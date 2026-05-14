@@ -3,7 +3,8 @@ import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:wiespl_surgeon_panel/services/esptwo.dart'; // Updated import
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wiespl_surgeon_panel/services/esptwo.dart';
 
 class ORStatusMonitor extends StatefulWidget {
   @override
@@ -29,22 +30,40 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
   final Random _random = Random();
   final List<MedicalParticle> _particles = [];
 
+  bool _isEspInitialized = false;
+
+  // ── OR Info ─────────────────────────────────────────────────────────────────
+  String _otNumber = '';
+  String _doctorName = '';
+  String _patientName = '';
+  String _surgeryName = '';
+  // ────────────────────────────────────────────────────────────────────────────
+
   @override
   void initState() {
     super.initState();
 
+    // Load OR info from SharedPreferences
+    _loadORInfo();
+
     // Initialize ESP32 provider
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       final espProvider = Provider.of<ESP32Provider>(context, listen: false);
-      espProvider.startPolling();
+      await espProvider.initialize();
+      setState(() {
+        _isEspInitialized = true;
+      });
+      print(
+        "✅ ESP32 Provider initialized in ORStatusMonitor with IP: ${espProvider.esp32IP}",
+      );
     });
 
-    // particles
+    // Particles
     for (int i = 0; i < 18; i++) {
       _particles.add(MedicalParticle(_random));
     }
 
-    // animations
+    // Animations
     _cardController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 700),
@@ -69,13 +88,24 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
 
     _cardController.forward();
 
-    // Initialize date/time timer
     _dateTimeTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       setState(() {
         _currentDateTime = DateTime.now();
       });
     });
   }
+
+  // ── Load OR info ─────────────────────────────────────────────────────────────
+  Future<void> _loadORInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _otNumber = prefs.getString("otNumber") ?? '';
+      _doctorName = prefs.getString("doctorName") ?? '';
+      _patientName = prefs.getString("patientName") ?? '';
+      _surgeryName = prefs.getString("surgeryName") ?? '';
+    });
+  }
+  // ────────────────────────────────────────────────────────────────────────────
 
   @override
   void dispose() {
@@ -85,7 +115,6 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     _dateTimeTimer.cancel();
     _pressureAdjustController.dispose();
 
-    // Stop ESP32 polling
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final espProvider = Provider.of<ESP32Provider>(context, listen: false);
       espProvider.stopPolling();
@@ -94,7 +123,6 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     super.dispose();
   }
 
-  // Date and time formatting methods
   String _formattedDate() {
     return "${_currentDateTime.day.toString().padLeft(2, '0')} ${_monthName(_currentDateTime.month)} ${_currentDateTime.year}";
   }
@@ -125,7 +153,6 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     return months[m - 1];
   }
 
-  // Pressure adjustment methods
   void _showPressureAdjustmentDialog(
     ESP32Provider espProvider,
     String currentPressure,
@@ -141,7 +168,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
           borderRadius: BorderRadius.circular(16),
           side: BorderSide(color: Colors.white.withOpacity(0.2), width: 1),
         ),
-        title: Text(
+        title: const Text(
           'Adjust Entrance Pressure',
           style: TextStyle(
             color: Colors.white,
@@ -154,7 +181,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
           children: [
             Text(
               'Current Pressure: $currentPressure Pa',
-              style: TextStyle(color: Colors.white70, fontSize: 14),
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
             ),
             const SizedBox(height: 16),
             TextField(
@@ -162,7 +189,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
                 labelText: 'Enter value',
-                labelStyle: TextStyle(color: Colors.white70),
+                labelStyle: const TextStyle(color: Colors.white70),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
                   borderSide: BorderSide(color: Colors.white.withOpacity(0.3)),
@@ -173,12 +200,12 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: Colors.blueAccent),
+                  borderSide: const BorderSide(color: Colors.blueAccent),
                 ),
                 fillColor: Colors.white.withOpacity(0.1),
                 filled: true,
               ),
-              style: TextStyle(color: Colors.white),
+              style: const TextStyle(color: Colors.white),
             ),
             const SizedBox(height: 16),
             Row(
@@ -239,7 +266,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     final input = _pressureAdjustController.text.trim();
     if (input.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           backgroundColor: Colors.orange,
           content: Text('Please enter a value'),
           duration: Duration(seconds: 2),
@@ -251,7 +278,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     final adjustment = double.tryParse(input);
     if (adjustment == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           backgroundColor: Colors.orange,
           content: Text('Please enter a valid number'),
           duration: Duration(seconds: 2),
@@ -260,31 +287,19 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
       return;
     }
 
-    // Get current pressure value
     final currentPressure =
         double.tryParse(espProvider.getFormattedPressure()) ?? 0;
+    double newPressure = isPositive
+        ? currentPressure + adjustment
+        : currentPressure - adjustment;
+    if (newPressure < 0) newPressure = 0;
 
-    // Calculate new pressure
-    double newPressure;
-    if (isPositive) {
-      newPressure = currentPressure + adjustment;
-    } else {
-      newPressure = currentPressure - adjustment;
-    }
-
-    // Ensure pressure is never negative (minimum 0)
-    if (newPressure < 0) {
-      newPressure = 0;
-    }
-
-    // TODO: Implement pressure adjustment in ESP32Provider
-    // For now, just show a message
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         backgroundColor: isPositive ? Colors.green : Colors.red,
         content: Text(
           'Pressure ${isPositive ? 'increased' : 'decreased'} by $adjustment Pa\nNew pressure: ${newPressure.toStringAsFixed(0)} Pa',
-          style: TextStyle(color: Colors.white),
+          style: const TextStyle(color: Colors.white),
         ),
         duration: const Duration(seconds: 2),
       ),
@@ -294,19 +309,15 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
   }
 
   Widget _buildConnectionStatus(ESP32Provider espProvider) {
-    Color statusColor;
-    String statusText;
-    IconData statusIcon;
-
-    if (espProvider.isConnected) {
-      statusColor = Colors.transparent;
-      statusText = "";
-      statusIcon = Icons.wifi;
-    } else {
-      statusColor = Colors.redAccent;
-      statusText = "Disconnected";
-      statusIcon = Icons.signal_wifi_off;
-    }
+    final Color statusColor = espProvider.isConnected
+        ? Colors.green
+        : Colors.redAccent;
+    final String statusText = espProvider.isConnected
+        ? "Connected"
+        : "Disconnected";
+    final IconData statusIcon = espProvider.isConnected
+        ? Icons.wifi
+        : Icons.signal_wifi_off;
 
     return Row(
       children: [
@@ -330,30 +341,22 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     );
   }
 
-  // Get sensor data from ESP32 provider
   _SensorData _getSensorData(ESP32Provider espProvider) {
-    // Get formatted pressure from ESP32 provider (should already have no leading zeros)
     String pressureValue = espProvider.getFormattedPressure();
 
-    // Ensure pressure is displayed as integer without decimals
     if (pressureValue.contains('.')) {
       pressureValue = pressureValue.split('.')[0];
     }
 
-    // Additional safety: if the value has leading zeros, remove them
-    // This is a double-check in case the provider doesn't handle it properly
     if (pressureValue.isNotEmpty && pressureValue != "0") {
-      // Remove leading zeros but keep the sign if present
       if (pressureValue.startsWith('-')) {
-        // Handle negative values
-        String absoluteValue = pressureValue.substring(1);
+        final absoluteValue = pressureValue.substring(1);
         if (absoluteValue.isNotEmpty) {
-          int intValue = int.tryParse(absoluteValue) ?? 0;
+          final intValue = int.tryParse(absoluteValue) ?? 0;
           pressureValue = '-${intValue.toString()}';
         }
       } else {
-        // Handle positive values
-        int intValue = int.tryParse(pressureValue) ?? 0;
+        final intValue = int.tryParse(pressureValue) ?? 0;
         pressureValue = intValue.toString();
       }
     }
@@ -367,7 +370,6 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     );
   }
 
-  // Helper method to handle toggle actions
   void _handleToggle(String type, bool value, ESP32Provider espProvider) {
     switch (type) {
       case 'defumigation':
@@ -382,7 +384,6 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     }
   }
 
-  // Helper method to get toggle states
   bool _getToggleState(String type, ESP32Provider espProvider) {
     switch (type) {
       case 'defumigation':
@@ -400,12 +401,38 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
   Widget build(BuildContext context) {
     return Consumer<ESP32Provider>(
       builder: (context, espProvider, child) {
+        if (!_isEspInitialized) {
+          return Scaffold(
+            backgroundColor: const Color(0xFF3D8A8F),
+            body: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const CircularProgressIndicator(
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    "Connecting to ESP32...",
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                  Text(
+                    "IP: ${espProvider.esp32IP}",
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+
         final sensorData = _getSensorData(espProvider);
 
         return Scaffold(
           backgroundColor: const Color(0xFF3D8A8F),
           body: Stack(
             children: [
+              // Animated background
               AnimatedBuilder(
                 animation: _bgController,
                 builder: (context, child) {
@@ -418,21 +445,21 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                   );
                 },
               ),
+
               SafeArea(
                 child: Padding(
                   padding: const EdgeInsets.all(20.0),
                   child: Column(
                     children: [
+                      // ── Top bar ──────────────────────────────────────────
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           InkWell(
-                            onTap: () {
-                              _showPressureAdjustmentDialog(
-                                espProvider,
-                                sensorData.pressure,
-                              );
-                            },
+                            onTap: () => _showPressureAdjustmentDialog(
+                              espProvider,
+                              sensorData.pressure,
+                            ),
                             child: Stack(
                               alignment: Alignment.center,
                               children: [
@@ -503,24 +530,8 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                           ),
                           Row(
                             children: [
-                              // Connection status
                               _buildConnectionStatus(espProvider),
                               const SizedBox(width: 8),
-                              // Add Pressure Adjustment Button
-                              // IconButton(
-                              //   onPressed: () => _showPressureAdjustmentDialog(
-                              //     espProvider,
-                              //     sensorData.pressure,
-                              //   ),
-                              //   icon: const Icon(
-                              //     Icons.add_chart_outlined,
-                              //     color: Colors.white70,
-                              //     size: 24,
-                              //   ),
-                              //   tooltip: "Adjust Pressure",
-                              // ),
-                              const SizedBox(width: 8),
-                              // Refresh button
                               IconButton(
                                 onPressed: () {
                                   if (espProvider.isConnected) {
@@ -541,7 +552,8 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                           ),
                         ],
                       ),
-                      const SizedBox(height: 28),
+                      const SizedBox(height: 20),
+
                       const Text(
                         "OR Status Monitor",
                         style: TextStyle(
@@ -551,7 +563,53 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                           letterSpacing: 0.8,
                         ),
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 12),
+
+                      // ── OR Info Strip ────────────────────────────────────
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.15),
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            _orInfoTile(
+                              Icons.meeting_room_outlined,
+                              "OT",
+                              _otNumber,
+                            ),
+                            _orInfoDivider(),
+                            _orInfoTile(
+                              Icons.medical_services_outlined,
+                              "Doctor",
+                              _doctorName,
+                            ),
+                            _orInfoDivider(),
+                            _orInfoTile(
+                              Icons.person_outline,
+                              "Patient",
+                              _patientName,
+                            ),
+                            _orInfoDivider(),
+                            _orInfoTile(
+                              Icons.local_hospital_outlined,
+                              "Surgery",
+                              _surgeryName,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+
+                      // ── Sensor + Time/Date card ──────────────────────────
                       Expanded(
                         child: SlideTransition(
                           position: _cardSlideAnimation,
@@ -568,7 +626,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                               children: [
-                                // Line 1: Temperature, R/H, and Room Pressure
+                                // Temperature | R/H | Room Pressure
                                 _buildThreeItemRow(
                                   item1: _statusTile(
                                     title: "Temperature",
@@ -597,7 +655,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                                   ),
                                   painter: SimpleSeparatorPainter(),
                                 ),
-                                // Line 2: Time and Date
+                                // Time | Date
                                 _buildStatusRow(
                                   title1: "Time",
                                   value1: _formattedTime(),
@@ -612,36 +670,34 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
                         ),
                       ),
                       const SizedBox(height: 28),
-                      // Toggle buttons row - Reordered to match logical sequence
+
+                      // ── Toggle Buttons ───────────────────────────────────
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceAround,
                         children: [
-                          // Defumigation - Light 8
                           _customToggle(
                             label: "Defumigation",
                             value: _getToggleState('defumigation', espProvider),
                             icon: Icons.wb_cloudy_outlined,
-                            onChanged: (value) {
-                              _handleToggle('defumigation', value, espProvider);
-                            },
+                            onChanged: (value) => _handleToggle(
+                              'defumigation',
+                              value,
+                              espProvider,
+                            ),
                           ),
-                          // Night - Light 9 (should come before System/Light 10)
                           _customToggle(
                             label: "Night",
                             value: _getToggleState('night', espProvider),
                             icon: Icons.mode_night_outlined,
-                            onChanged: (value) {
-                              _handleToggle('night', value, espProvider);
-                            },
+                            onChanged: (value) =>
+                                _handleToggle('night', value, espProvider),
                           ),
-                          // System - Light 10
                           _customToggle(
                             label: "System",
                             value: _getToggleState('system', espProvider),
                             icon: Icons.power_settings_new,
-                            onChanged: (value) {
-                              _handleToggle('system', value, espProvider);
-                            },
+                            onChanged: (value) =>
+                                _handleToggle('system', value, espProvider),
                           ),
                         ],
                       ),
@@ -656,6 +712,55 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     );
   }
 
+  // ── OR Info helpers ───────────────────────────────────────────────────────────
+
+  Widget _orInfoTile(IconData icon, String label, String value) {
+    return Expanded(
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.cyanAccent, size: 20),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 21,
+                    color: Colors.white54,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                Text(
+                  value.isEmpty ? '—' : value,
+                  style: const TextStyle(
+                    fontSize: 28,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _orInfoDivider() {
+    return Container(
+      height: 36,
+      width: 1,
+      margin: const EdgeInsets.symmetric(horizontal: 10),
+      color: Colors.white.withOpacity(0.18),
+    );
+  }
+
+  // ── Sensor tile helpers ───────────────────────────────────────────────────────
+
   Widget _pressureStatusTile({
     required String title,
     required String value,
@@ -669,12 +774,10 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
           children: [
             AnimatedBuilder(
               animation: _pulseAnimation,
-              builder: (context, child) {
-                return Transform.scale(
-                  scale: _pulseAnimation.value,
-                  child: Icon(icon, color: Colors.white70, size: 22),
-                );
-              },
+              builder: (context, child) => Transform.scale(
+                scale: _pulseAnimation.value,
+                child: Icon(icon, color: Colors.white70, size: 22),
+              ),
             ),
             const SizedBox(width: 8),
             Flexible(
@@ -768,12 +871,10 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
           children: [
             AnimatedBuilder(
               animation: _pulseAnimation,
-              builder: (context, child) {
-                return Transform.scale(
-                  scale: _pulseAnimation.value,
-                  child: Icon(icon, color: Colors.white70, size: 22),
-                );
-              },
+              builder: (context, child) => Transform.scale(
+                scale: _pulseAnimation.value,
+                child: Icon(icon, color: Colors.white70, size: 22),
+              ),
             ),
             const SizedBox(width: 8),
             Flexible(
@@ -873,7 +974,8 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
   }
 }
 
-// Helper class to hold sensor data
+// ── Data class ────────────────────────────────────────────────────────────────
+
 class _SensorData {
   final String temperature;
   final String humidity;
@@ -889,6 +991,8 @@ class _SensorData {
     required this.pressureColor,
   });
 }
+
+// ── Animated counter ──────────────────────────────────────────────────────────
 
 class _AnimatedCounter extends StatefulWidget {
   final String value;
@@ -917,13 +1021,10 @@ class _AnimatedCounterState extends State<_AnimatedCounter>
   @override
   void didUpdateWidget(covariant _AnimatedCounter oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.value != widget.value) {
-      _updateValue();
-    }
+    if (oldWidget.value != widget.value) _updateValue();
   }
 
   void _updateValue() {
-    // Handle both integer and decimal values
     final start = double.tryParse(_currentValue) ?? 0.0;
     final end = double.tryParse(widget.value) ?? 0.0;
     _animation = Tween<double>(
@@ -944,13 +1045,10 @@ class _AnimatedCounterState extends State<_AnimatedCounter>
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
-        // Format the value to remove decimal places for integer values
-        final animatedValue = _animation.value;
-        if (animatedValue == animatedValue.truncateToDouble()) {
-          _currentValue = animatedValue.toInt().toString();
-        } else {
-          _currentValue = animatedValue.toStringAsFixed(1);
-        }
+        final v = _animation.value;
+        _currentValue = v == v.truncateToDouble()
+            ? v.toInt().toString()
+            : v.toStringAsFixed(1);
         return Text(
           _currentValue,
           style: const TextStyle(
@@ -963,6 +1061,8 @@ class _AnimatedCounterState extends State<_AnimatedCounter>
     );
   }
 }
+
+// ── Painters ──────────────────────────────────────────────────────────────────
 
 class SimpleSeparatorPainter extends CustomPainter {
   @override
@@ -996,7 +1096,6 @@ class MedicalParticle {
   void update(double t) {
     x += vx + 0.0002 * sin(t * 2 * pi + x * 10);
     y += vy + 0.0002 * cos(t * 2 * pi + y * 10);
-
     if (x < -0.02) x = 1.02;
     if (x > 1.02) x = -0.02;
     if (y < -0.02) y = 1.02;
@@ -1005,7 +1104,7 @@ class MedicalParticle {
 }
 
 class ClinicalBackgroundPainter extends CustomPainter {
-  final double t; // 0..1
+  final double t;
   final List<MedicalParticle> particles;
   ClinicalBackgroundPainter({required this.t, required this.particles});
 
@@ -1023,6 +1122,7 @@ class ClinicalBackgroundPainter extends CustomPainter {
       ],
     );
     canvas.drawRect(rect, Paint()..shader = gradient.createShader(rect));
+
     final gridPaint = Paint()
       ..color = Colors.white.withOpacity(0.02)
       ..strokeWidth = 0.5;
@@ -1052,7 +1152,6 @@ class ClinicalBackgroundPainter extends CustomPainter {
     final glowPaint = Paint()
       ..color = Colors.cyanAccent.withOpacity(0.12)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 50);
-
     canvas.drawCircle(
       Offset(size.width * 0.25, size.height * (0.35 + 0.05 * sin(t * 2 * pi))),
       120,
@@ -1068,9 +1167,11 @@ class ClinicalBackgroundPainter extends CustomPainter {
     for (var p in particles) {
       p.update(t);
       dotPaint.color = Colors.white.withOpacity(p.opacity);
-      final cx = p.x * size.width;
-      final cy = p.y * size.height;
-      canvas.drawCircle(Offset(cx, cy), p.size, dotPaint);
+      canvas.drawCircle(
+        Offset(p.x * size.width, p.y * size.height),
+        p.size,
+        dotPaint,
+      );
     }
 
     _drawECG(canvas, size, t);
@@ -1086,8 +1187,7 @@ class ClinicalBackgroundPainter extends CustomPainter {
     final path = Path();
     final amplitude = size.height * 0.03;
     final baselineY = size.height * 0.22;
-    final speed = 0.6;
-    final offsetX = phase * size.width * speed;
+    final offsetX = phase * size.width * 0.6;
 
     bool first = true;
     for (double x = -size.width; x <= size.width * 2; x += 4) {

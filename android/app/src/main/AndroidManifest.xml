@@ -12,8 +12,6 @@
     <!-- Optional: For better network discovery -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     
-    <!-- Optional: For USB access if needed -->
-    <uses-permission android:name="android.permission.USB_PERMISSION" />
     
     <application
         android:label="wiespl_surgeon_panel"

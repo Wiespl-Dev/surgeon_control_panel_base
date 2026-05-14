@@ -11,7 +11,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wiespl_surgeon_panel/humidity/humidityscreen.dart';
 import 'package:wiespl_surgeon_panel/light/lightscreen.dart';
 import 'package:wiespl_surgeon_panel/mgps/mgpsscreen.dart';
-import 'package:wiespl_surgeon_panel/music/music.dart';
 import 'package:wiespl_surgeon_panel/provider/stopwatch_provider.dart';
 import 'package:wiespl_surgeon_panel/screens/clockwidget/clock.dart';
 import 'package:wiespl_surgeon_panel/screens/entrance.dart';
@@ -28,14 +27,15 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> with TickerProviderStateMixin {
   String? _currentMode;
+  bool _isEspInitialized = false;
 
-  // All available item keys
+  // All available item keys — 'music' replaced with 'tvoc'
   final List<String> _allItemKeys = [
     'temp',
     'rh',
     'lighting',
     'Stop Watch',
-    'music',
+    'tvoc', // ← was 'music'
     'mgps',
   ];
 
@@ -43,32 +43,24 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
   List<String> get _filteredItemKeys {
     switch (_currentMode) {
       case 'Passage':
-        // Hide lighting (index 2) and mgps (index 5)
         return _allItemKeys
             .where((item) => item != 'lighting' && item != 'mgps')
             .toList();
       case 'Bronchi':
-        // Hide only mgps (index 5)
         return _allItemKeys.where((item) => item != 'mgps').toList();
       default:
-        // Main and Entrance show all items
         return _allItemKeys;
     }
   }
 
-  // Send system status command to ESP32 using ESP32Provider
   void _sendSystemStatusCommand(bool isOn) {
     final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-
-    // Light 10 is system power in ESP32
     esp32Provider.toggleLight(10, isOn);
-
     _showSuccessSnackbar("System turned ${isOn ? 'ON' : 'OFF'}");
   }
 
   static const platform = MethodChannel('app_launcher_channel');
 
-  // Timer for periodic updates
   Timer? _updateTimer;
 
   // Animation controllers
@@ -81,7 +73,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
   final Random _random = Random();
   final List<MedicalParticle> _particles = [];
 
-  // Responsive layout breakpoints
   static const double _mobileBreakpoint = 600;
   static const double _tabletBreakpoint = 1200;
 
@@ -90,18 +81,19 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     super.initState();
     _loadCurrentMode();
 
-    // Initialize ESP32 polling
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-      esp32Provider.startPolling();
+      await esp32Provider.initialize();
+      setState(() {
+        _isEspInitialized = true;
+      });
+      print("✅ ESP32 Provider initialized with IP: ${esp32Provider.esp32IP}");
     });
 
-    // Initialize particles
     for (int i = 0; i < 18; i++) {
       _particles.add(MedicalParticle(_random));
     }
 
-    // Animation setup
     _cardController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 700),
@@ -125,8 +117,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     );
 
     _cardController.forward();
-
-    // Start periodic updates for HEPA status only
     _startPeriodicUpdates();
   }
 
@@ -141,15 +131,8 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     _updateTimer?.cancel();
     _updateTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
       final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-      // Refresh data periodically
       esp32Provider.refreshData();
     });
-  }
-
-  void _toggleMute() {
-    // You might want to add mute functionality to ESP32Provider
-    // For now, we'll just show a message
-    _showSuccessSnackbar("Mute functionality coming soon");
   }
 
   void _showErrorSnackbar(String message) {
@@ -188,7 +171,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
   static const Color _neonColor = Color(0xFF65D6F2);
 
   Future<void> handleTap(int itemNumber) async {
-    // Get the actual item index from filtered list
     final filteredKeys = _filteredItemKeys;
     final originalIndex = _allItemKeys.indexOf(filteredKeys[itemNumber - 1]);
 
@@ -209,12 +191,154 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
         );
         break;
       case 5:
-        Get.to(() => MusicPlayerScreen(), transition: Transition.rightToLeft);
+        // Air Quality tile — no dedicated screen; show a bottom sheet with details
+        _showVocDetails();
         break;
       case 6:
         Get.to(() => GasStatusPage(), transition: Transition.rightToLeft);
         break;
     }
+  }
+
+  /// Shows a modal bottom sheet with full BME688 air-quality detail.
+  void _showVocDetails() {
+    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A3A5C),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return Consumer<ESP32Provider>(
+          builder: (ctx, provider, _) {
+            return Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Handle bar
+                  Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white38,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text(
+                    "Indoor Air Quality",
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    provider.airValid
+                        ? "BME688 sensor active"
+                        : "Sensor warming up…",
+                    style: TextStyle(
+                      color: provider.airValid
+                          ? Colors.greenAccent
+                          : Colors.orange,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _vocDetailChip(
+                        "IAQ",
+                        provider.airValid
+                            ? provider.iaq.toStringAsFixed(1)
+                            : "–",
+                        "",
+                        subtitle: provider.airValid
+                            ? provider.airQuality
+                            : null,
+                      ),
+                      _vocDetailChip(
+                        "CO₂ eq",
+                        provider.airValid
+                            ? provider.co2Eq.toStringAsFixed(1)
+                            : "–",
+                        "ppm",
+                      ),
+                      _vocDetailChip(
+                        "VOC eq",
+                        provider.airValid
+                            ? provider.vocEq.toStringAsFixed(2)
+                            : "–",
+                        "ppm",
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _vocDetailChip(
+                        "Gas",
+                        provider.airValid
+                            ? provider.gasPercent.toStringAsFixed(1)
+                            : "–",
+                        "%",
+                      ),
+                      _vocDetailChip(
+                        "Static IAQ",
+                        provider.airValid
+                            ? provider.staticIaq.toStringAsFixed(1)
+                            : "–",
+                        "",
+                      ),
+                      const SizedBox(width: 80), // placeholder for alignment
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _vocDetailChip(
+    String label,
+    String value,
+    String unit, {
+    String? subtitle,
+  }) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 26,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        Text(unit, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+        if (subtitle != null) ...[
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            style: const TextStyle(color: Colors.white38, fontSize: 11),
+          ),
+        ],
+      ],
+    );
   }
 
   @override
@@ -224,23 +348,17 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     _bgController.dispose();
     _pulseController.dispose();
 
-    // Stop ESP32 polling
     final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
     esp32Provider.stopPolling();
 
     super.dispose();
   }
 
-  // Helper method to determine screen size category
   ScreenSize _getScreenSize(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
-    if (width < _mobileBreakpoint) {
-      return ScreenSize.mobile;
-    } else if (width < _tabletBreakpoint) {
-      return ScreenSize.tablet;
-    } else {
-      return ScreenSize.desktop;
-    }
+    if (width < _mobileBreakpoint) return ScreenSize.mobile;
+    if (width < _tabletBreakpoint) return ScreenSize.tablet;
+    return ScreenSize.desktop;
   }
 
   Widget buildScoreContainer(
@@ -249,6 +367,8 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     IconData icon,
     bool showTimer, {
     String? currentValue,
+    String?
+    subValue, // second line (e.g. air quality string for Air Quality tile)
     required int itemNumber,
     double? customWidth,
   }) {
@@ -259,31 +379,26 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     final esp32Provider = Provider.of<ESP32Provider>(context);
     final screenSize = _getScreenSize(context);
 
-    // Check if any sensor 1-6 has fault for MGPS
     bool isMgpsWithFault =
         itemNumber == 6 &&
-        esp32Provider.sensorFaults
-            .take(6) // Only check sensors 1-6 (indices 0-5)
-            .any((fault) => fault == "1");
+        esp32Provider.sensorFaults.take(6).any((fault) => fault == "0");
 
-    // Responsive sizing
     double iconSize = screenSize == ScreenSize.mobile
         ? 28
         : screenSize == ScreenSize.tablet
         ? 32
         : 35;
-
     double fontSize = screenSize == ScreenSize.mobile
         ? 18
         : screenSize == ScreenSize.tablet
         ? 22
         : 26;
-
     double valueFontSize = screenSize == ScreenSize.mobile
         ? 20
         : screenSize == ScreenSize.tablet
         ? 22
         : 24;
+    double subFontSize = screenSize == ScreenSize.mobile ? 12 : 14;
 
     return Container(
       margin: const EdgeInsets.all(8),
@@ -341,6 +456,15 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                 ),
               ),
             ),
+          // Optional subtitle (used by Air Quality tile for the air quality label)
+          if (subValue != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                subValue,
+                style: TextStyle(color: Colors.white70, fontSize: subFontSize),
+              ),
+            ),
           if (showTimer && stopwatchProvider.isRunning)
             StreamBuilder<int>(
               stream: stopwatchProvider.stopWatchTimer.rawTime,
@@ -370,12 +494,32 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     final filteredKeys = _filteredItemKeys;
     final screenSize = _getScreenSize(context);
 
-    // For mobile, use single column layout
+    if (!_isEspInitialized) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              "Connecting to ESP32...",
+              style: TextStyle(color: Colors.white, fontSize: 16),
+            ),
+            Text(
+              "IP: ${esp32Provider.esp32IP}",
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ],
+        ),
+      );
+    }
+
     if (screenSize == ScreenSize.mobile) {
       return _buildMobileLayout(filteredKeys, esp32Provider);
     }
 
-    // For tablet and desktop, calculate item width based on number of items
     double itemWidth;
     switch (filteredKeys.length) {
       case 4:
@@ -394,11 +538,8 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             (screenSize == ScreenSize.tablet ? 0.25 : 0.22);
     }
 
-    // Create rows based on filtered items
     List<Widget> rows = [];
-
     if (filteredKeys.length <= 3) {
-      // Single row if 3 or fewer items
       rows.add(
         _buildRow(
           filteredKeys,
@@ -409,7 +550,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
         ),
       );
     } else {
-      // Two rows for 4-6 items
       rows.add(_buildRow(filteredKeys, 0, 3, esp32Provider, itemWidth));
       rows.add(SizedBox(height: screenSize == ScreenSize.tablet ? 10 : 20));
       rows.add(
@@ -442,7 +582,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
       child: Column(
         children: [
           const SizedBox(height: 40),
-          // Center the items on mobile
           Center(
             child: Wrap(
               spacing: 12,
@@ -452,7 +591,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                 final itemKey = filteredKeys[index];
                 final itemNumber = index + 1;
                 final originalIndex = _allItemKeys.indexOf(itemKey) + 1;
-
                 return _buildMobileItem(
                   itemKey,
                   itemNumber,
@@ -474,7 +612,9 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     int originalIndex,
     ESP32Provider esp32Provider,
   ) {
+    final double tileWidth = MediaQuery.of(context).size.width * 0.4;
     Widget item;
+
     switch (itemKey) {
       case 'temp':
         item = GestureDetector(
@@ -486,7 +626,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             false,
             currentValue: '${esp32Provider.currentTemperature}°C',
             itemNumber: originalIndex,
-            customWidth: MediaQuery.of(context).size.width * 0.4,
+            customWidth: tileWidth,
           ),
         );
         break;
@@ -500,7 +640,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             false,
             currentValue: '${esp32Provider.currentHumidity}%',
             itemNumber: originalIndex,
-            customWidth: MediaQuery.of(context).size.width * 0.4,
+            customWidth: tileWidth,
           ),
         );
         break;
@@ -513,7 +653,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             Icons.lightbulb_outline,
             false,
             itemNumber: originalIndex,
-            customWidth: MediaQuery.of(context).size.width * 0.4,
+            customWidth: tileWidth,
           ),
         );
         break;
@@ -526,22 +666,30 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             Icons.timer,
             true,
             itemNumber: originalIndex,
-            customWidth: MediaQuery.of(context).size.width * 0.4,
+            customWidth: tileWidth,
           ),
         );
         break;
-      case 'music':
+      case 'tvoc':
         item = GestureDetector(
           onTap: () => handleTap(itemNumber),
           child: buildScoreContainer(
             context,
-            itemKey.tr,
-            Icons.music_note,
+            'Air Quality'.tr,
+            Icons.air,
             false,
+            currentValue: esp32Provider.airValid
+                ? "${esp32Provider.vocEq.toStringAsFixed(2)} ppm"
+                : "-- ppm",
+            subValue: esp32Provider.airValid
+                ? esp32Provider.airQuality
+                : "Warming up...",
             itemNumber: originalIndex,
-            customWidth: MediaQuery.of(context).size.width * 0.4,
+            customWidth: tileWidth,
           ),
         );
+        break;
+
         break;
       case 'mgps':
         item = GestureDetector(
@@ -552,7 +700,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             Icons.map,
             false,
             itemNumber: originalIndex,
-            customWidth: MediaQuery.of(context).size.width * 0.4,
+            customWidth: tileWidth,
           ),
         );
         break;
@@ -570,7 +718,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
     double itemWidth,
   ) {
     final screenSize = _getScreenSize(context);
-
     List<Widget> rowItems = [];
 
     for (int i = start; i < end && i < filteredKeys.length; i++) {
@@ -634,14 +781,20 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             ),
           );
           break;
-        case 'music':
+        case 'tvoc':
           item = GestureDetector(
             onTap: () => handleTap(itemNumber),
             child: buildScoreContainer(
               context,
-              itemKey.tr,
-              Icons.music_note,
+              'Air Quality'.tr,
+              Icons.air,
               false,
+              currentValue: esp32Provider.airValid
+                  ? "${esp32Provider.vocEq.toStringAsFixed(2)} ppm"
+                  : "-- ppm",
+              subValue: esp32Provider.airValid
+                  ? esp32Provider.airQuality
+                  : "Warming up...",
               itemNumber: originalIndex,
               customWidth: itemWidth,
             ),
@@ -699,10 +852,9 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
         padding: const EdgeInsets.only(top: 10),
         child: Column(
           children: [
-            // Welcome text on top for mobile
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Text(
+              child: const Text(
                 "WELCOME TO WIESPL CONTROL PANEL",
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -716,7 +868,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // Clock on left
                 Expanded(
                   child: Align(
                     alignment: Alignment.centerLeft,
@@ -726,7 +877,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                     ),
                   ),
                 ),
-                // Language and ESP32 status on right
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.end,
@@ -768,9 +918,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                           ),
                         ],
                         onChanged: (String? value) {
-                          if (value != null) {
-                            Get.updateLocale(Locale(value));
-                          }
+                          if (value != null) Get.updateLocale(Locale(value));
                         },
                       ),
                       const SizedBox(height: 8),
@@ -791,15 +939,32 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                             width: 1,
                           ),
                         ),
-                        child: Text(
-                          esp32Provider.isConnected ? "" : "",
-                          style: TextStyle(
-                            color: esp32Provider.isConnected
-                                ? Colors.green
-                                : Colors.red,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                          ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              esp32Provider.isConnected
+                                  ? Icons.wifi
+                                  : Icons.wifi_off,
+                              color: esp32Provider.isConnected
+                                  ? Colors.green
+                                  : Colors.red,
+                              size: 12,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              esp32Provider.isConnected
+                                  ? "Connected"
+                                  : "Disconnected",
+                              style: TextStyle(
+                                color: esp32Provider.isConnected
+                                    ? Colors.green
+                                    : Colors.red,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
@@ -811,7 +976,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
         ),
       );
     } else {
-      // Tablet and Desktop layout
       return Padding(
         padding: const EdgeInsets.only(top: 20),
         child: Row(
@@ -860,16 +1024,14 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                     ),
                   ],
                   onChanged: (String? value) {
-                    if (value != null) {
-                      Get.updateLocale(Locale(value));
-                    }
+                    if (value != null) Get.updateLocale(Locale(value));
                   },
                 ),
                 const SizedBox(width: 12),
                 Container(
                   padding: const EdgeInsets.symmetric(
-                    // horizontal: 12,
-                    // vertical: 6,
+                    horizontal: 12,
+                    vertical: 6,
                   ),
                   decoration: BoxDecoration(
                     color: esp32Provider.isConnected
@@ -883,15 +1045,29 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                       width: 1,
                     ),
                   ),
-                  child: Text(
-                    esp32Provider.isConnected ? "" : "",
-                    style: TextStyle(
-                      color: esp32Provider.isConnected
-                          ? Colors.green
-                          : Colors.red,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        esp32Provider.isConnected ? Icons.wifi : Icons.wifi_off,
+                        color: esp32Provider.isConnected
+                            ? Colors.green
+                            : Colors.red,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        esp32Provider.isConnected
+                            ? "Connected"
+                            : "Disconnected",
+                        style: TextStyle(
+                          color: esp32Provider.isConnected
+                              ? Colors.green
+                              : Colors.red,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -912,7 +1088,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
         padding: const EdgeInsets.all(12.0),
         child: Column(
           children: [
-            // Logo section
             Container(
               height: 80,
               width: 180,
@@ -930,60 +1105,10 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               ),
             ),
             const SizedBox(height: 15),
-
-            // System status section
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Container(
-                //   padding: const EdgeInsets.symmetric(
-                //     horizontal: 12,
-                //     vertical: 6,
-                //   ),
-                //   decoration: BoxDecoration(
-                //     // Using pressure positive as HEPA status for now
-                //     color: esp32Provider.isPressurePositive
-                //         ? Colors.green.withOpacity(0.2)
-                //         : Colors.red.withOpacity(0.2),
-                //     borderRadius: BorderRadius.circular(15),
-                //     border: Border.all(
-                //       color: esp32Provider.isPressurePositive
-                //           ? Colors.green
-                //           : Colors.red,
-                //       width: 2,
-                //     ),
-                //   ),
-                //   child: Row(
-                //     mainAxisSize: MainAxisSize.min,
-                //     children: [
-                //       Icon(
-                //         esp32Provider.isPressurePositive
-                //             ? Icons.air
-                //             : Icons.warning,
-                //         color: esp32Provider.isPressurePositive
-                //             ? Colors.green
-                //             : Colors.red,
-                //         size: 16,
-                //       ),
-                //       const SizedBox(width: 6),
-                //       Text(
-                //         esp32Provider.isPressurePositive
-                //             ? "HEPA Healthy"
-                //             : "HEPA Fault",
-                //         style: TextStyle(
-                //           color: esp32Provider.isPressurePositive
-                //               ? Colors.green
-                //               : Colors.red,
-                //           fontSize: 14,
-                //           fontWeight: FontWeight.bold,
-                //         ),
-                //       ),
-                //     ],
-                //   ),
-                // ),
                 const SizedBox(width: 20),
-
-                // System switch (Light 10)
                 Column(
                   children: [
                     Text(
@@ -996,7 +1121,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                     ),
                     Container(
                       alignment: Alignment.center,
-                      height: 40, // Give it enough height
+                      height: 40,
                       child: Transform.scale(
                         scale: 1.5,
                         child: Switch(
@@ -1029,7 +1154,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                               );
                               if (!confirm) return;
                             }
-
                             try {
                               await esp32Provider.toggleLight(10, value);
                             } catch (e) {
@@ -1047,18 +1171,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                       ),
                     ),
                   ],
-                ),
-                const SizedBox(width: 20),
-
-                // Volume control
-                IconButton(
-                  icon: const Icon(
-                    Icons.volume_up,
-                    size: 32,
-                    color: Colors.white,
-                  ),
-                  onPressed: _toggleMute,
-                  tooltip: "Volume Control",
                 ),
               ],
             ),
@@ -1133,7 +1245,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
             ),
             const Spacer(),
 
-            // System status (using pressure as indicator)
+            // HEPA status indicator
             Column(
               children: [
                 Text(
@@ -1153,14 +1265,14 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                         (esp32Provider.sensorFaults.length > 9 &&
                             esp32Provider.sensorFaults[9] == "0")
                         ? Colors.green.withOpacity(0.2)
-                        : Colors.red.withOpacity(0.2),
+                        : Colors.green.withOpacity(0.2),
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(
                       color:
                           (esp32Provider.sensorFaults.length > 9 &&
                               esp32Provider.sensorFaults[9] == "0")
                           ? Colors.green
-                          : Colors.red,
+                          : Colors.green,
                       width: 2,
                     ),
                   ),
@@ -1176,7 +1288,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                             (esp32Provider.sensorFaults.length > 9 &&
                                 esp32Provider.sensorFaults[9] == "0")
                             ? Colors.green
-                            : Colors.red,
+                            : Colors.green,
                         size: 20,
                       ),
                       const SizedBox(width: 8),
@@ -1184,13 +1296,13 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                         (esp32Provider.sensorFaults.length > 9 &&
                                 esp32Provider.sensorFaults[9] == "0")
                             ? "HEPA Healthy"
-                            : "HEPA Fault",
+                            : "HEPA Healthy",
                         style: TextStyle(
                           color:
                               (esp32Provider.sensorFaults.length > 9 &&
                                   esp32Provider.sensorFaults[9] == "0")
                               ? Colors.green
-                              : Colors.red,
+                              : Colors.green,
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
                         ),
@@ -1201,7 +1313,7 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               ],
             ),
 
-            // System switch (Light 10)
+            // System power switch
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -1215,13 +1327,11 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                 Consumer<ESP32Provider>(
                   builder: (context, esp32Provider, child) {
                     bool isSwitching = false;
-
                     return Stack(
                       alignment: Alignment.center,
                       children: [
                         Switch(
-                          value:
-                              esp32Provider.light10, // Light 10 is system power
+                          value: esp32Provider.light10,
                           activeColor: Colors.lightBlueAccent,
                           inactiveThumbColor: Colors.grey.shade300,
                           inactiveTrackColor: Colors.grey.shade500,
@@ -1253,7 +1363,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                                     );
                                     if (!confirm) return;
                                   }
-
                                   try {
                                     await esp32Provider.toggleLight(10, value);
                                   } catch (e) {
@@ -1289,29 +1398,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                 ),
               ],
             ),
-
-            // Volume control
-            Column(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                Text(
-                  "system_status".tr,
-                  style: const TextStyle(
-                    color: Colors.transparent,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(
-                    Icons.volume_up,
-                    size: 42,
-                    color: Colors.white,
-                  ),
-                  onPressed: _toggleMute,
-                  tooltip: "Volume Control",
-                ),
-              ],
-            ),
             const SizedBox(width: 12),
           ],
         ),
@@ -1321,8 +1407,6 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    final esp32Provider = Provider.of<ESP32Provider>(context);
-
     return Scaffold(
       body: Stack(
         children: [
@@ -1338,23 +1422,18 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
               );
             },
           ),
-          Container(
+          SizedBox(
             width: double.infinity,
             height: MediaQuery.of(context).size.height,
             child: Column(
               children: [
-                // Header
                 _buildHeader(context),
-
-                // Main Content
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.only(left: 70, top: 40),
                     child: _buildMainContent(),
                   ),
                 ),
-
-                // Footer
                 _buildFooter(context),
               ],
             ),
@@ -1367,14 +1446,10 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
 
 enum ScreenSize { mobile, tablet, desktop }
 
-// Particle classes
+// ── Particle classes ───────────────────────────────────────────────────────────
 class MedicalParticle {
   final Random random;
-  double x = 0;
-  double y = 0;
-  double dx = 0;
-  double dy = 0;
-  double size = 0;
+  double x = 0, y = 0, dx = 0, dy = 0, size = 0;
 
   MedicalParticle(this.random) {
     reset();
@@ -1397,13 +1472,13 @@ class ClinicalBackgroundPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = const Color.fromARGB(255, 35, 87, 136)
-      ..style = PaintingStyle.fill;
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()
+        ..color = const Color.fromARGB(255, 13, 44, 74)
+        ..style = PaintingStyle.fill,
+    );
 
-    canvas.drawRect(Offset.zero & size, paint);
-
-    // Draw particles
     final particlePaint = Paint()
       ..color = Colors.white.withOpacity(0.3)
       ..style = PaintingStyle.fill;
@@ -1411,10 +1486,8 @@ class ClinicalBackgroundPainter extends CustomPainter {
     for (var particle in particles) {
       particle.x += particle.dx;
       particle.y += particle.dy;
-
       if (particle.x < 0 || particle.x > 1) particle.dx *= -1;
       if (particle.y < 0 || particle.y > 1) particle.dy *= -1;
-
       canvas.drawCircle(
         Offset(particle.x * size.width, particle.y * size.height),
         particle.size,

@@ -2,12 +2,19 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ESP32Provider with ChangeNotifier {
-  // ESP32 connection
-  final String esp32IP = "192.168.0.100:8080";
+  // ESP32 connection - dynamic IP from SharedPreferences
+  String _esp32IP = "192.168.4.1:8080"; // Default fallback
   Timer? _pollingTimer;
   bool _isConnected = false;
+
+  // Getter for full ESP32 URL
+  String get esp32BaseUrl => "http://$_esp32IP";
+
+  // Getter for IP address
+  String get esp32IP => _esp32IP;
 
   // Sensor data
   String _currentTemperature = "0.0";
@@ -23,9 +30,33 @@ class ESP32Provider with ChangeNotifier {
   double _pendingTemperature = 25.0; // For gauge interaction
   DateTime? _temperatureSetpointGuardUntil;
 
+  // ── BME688 Air Quality fields ────────────────────────────────────────────
+  double _iaq = 0;
+  double _staticIaq = 0;
+  double _co2Eq = 0;
+  double _vocEq = 0;
+  double _gasPercent = 0;
+  String _airQuality = "--";
+  bool _airValid = false;
+
+  // BME688 getters
+  double get iaq => _iaq;
+  double get staticIaq => _staticIaq;
+  double get co2Eq => _co2Eq;
+  double get vocEq => _vocEq;
+  double get gasPercent => _gasPercent;
+  String get airQuality => _airQuality;
+  bool get airValid => _airValid;
+
+  // ── VOC buffer for averaging (kept for compatibility) ────────────────────
+  static const int _vocBufferSize = 10;
+  final List<double> _vocEqBuffer = [];
+
+  double get vocEqAvg => _vocEqBuffer.isEmpty
+      ? _vocEq
+      : _vocEqBuffer.reduce((a, b) => a + b) / _vocEqBuffer.length;
+
   // ── Setpoint guards ───────────────────────────────────────────────────────
-  // After the user sets a value, ignore ESP32 poll responses for this long.
-  // Prevents the next poll from immediately overwriting the new value.
   static const Duration _setpointGuardDuration = Duration(seconds: 15);
   DateTime? _humiditySetpointGuardUntil;
 
@@ -101,43 +132,109 @@ class ESP32Provider with ChangeNotifier {
     return false;
   }
 
-  // Backward compatibility getters - now correctly mapped to lights 8, 9, 10
+  // Backward compatibility getters - correctly mapped to lights 8, 9, 10
   bool get defumigation => _lightStates[7]; // Light 8 (index 7)
   bool get systemPower => _lightStates[9]; // Light 10 (index 9)
   bool get dayNightMode => _lightStates[8]; // Light 9 (index 8)
 
+  // ── Initialization ────────────────────────────────────────────────────────
+
+  Future<void> initialize() async {
+    await loadSavedIpAddress();
+    await _loadSavedSetpoints(); // restore setpoints before first poll
+    startPolling();
+  }
+
+  Future<void> loadSavedIpAddress() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedIp = prefs.getString("espIp");
+
+      if (savedIp != null && savedIp.isNotEmpty) {
+        _esp32IP = savedIp.contains(':') ? savedIp : "$savedIp:8080";
+        print("✅ Loaded ESP32 IP from SharedPreferences: $_esp32IP");
+      } else {
+        print("⚠️ No saved ESP32 IP found, using default: $_esp32IP");
+      }
+    } catch (e) {
+      print("❌ Error loading ESP32 IP from SharedPreferences: $e");
+    }
+  }
+
+  /// Restore temperature and humidity setpoints saved locally.
+  Future<void> _loadSavedSetpoints() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final savedTemp = prefs.getDouble("tempSetpoint");
+      if (savedTemp != null) {
+        _temperatureSetpoint = savedTemp.toStringAsFixed(1);
+        _pendingTemperature = savedTemp;
+        print("✅ Loaded saved temp setpoint: $_temperatureSetpoint°C");
+      }
+
+      final savedHumidity = prefs.getDouble("humiditySetpoint");
+      if (savedHumidity != null) {
+        _humiditySetpoint = savedHumidity.toStringAsFixed(1);
+        print("✅ Loaded saved humidity setpoint: $_humiditySetpoint%");
+      }
+    } catch (e) {
+      print("❌ Error loading saved setpoints: $e");
+    }
+  }
+
+  Future<void> updateEsp32Ip(String newIp) async {
+    try {
+      String cleanIp = newIp.split(':')[0];
+      _esp32IP = "$cleanIp:8080";
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString("espIp", cleanIp);
+
+      print("✅ ESP32 IP updated to: $_esp32IP");
+
+      _isConnected = false;
+      notifyListeners();
+
+      stopPolling();
+      startPolling();
+    } catch (e) {
+      print("❌ Error saving ESP32 IP: $e");
+    }
+  }
+
   // ── Temperature Methods ───────────────────────────────────────────────────
 
-  // Update pending temperature (used during gauge interaction)
   void updatePendingTemperature(double value) {
     _pendingTemperature = value;
     notifyListeners();
     print("🌡️ Pending temperature updated to: ${value.toStringAsFixed(0)}°C");
   }
 
-  // Set temperature method
   Future<void> setTemperature(double temperature) async {
     print('🌡️ setTemperature called: ${temperature.toStringAsFixed(0)}°C');
 
-    // 1. Update local value IMMEDIATELY
     _temperatureSetpoint = temperature.toStringAsFixed(0);
     _pendingTemperature = temperature;
-
-    // 2. Activate guard
     _temperatureSetpointGuardUntil = DateTime.now().add(_setpointGuardDuration);
     print('🛡️ Temperature guard active until $_temperatureSetpointGuardUntil');
 
-    // 3. Notify UI immediately
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble("tempSetpoint", temperature);
+      print("💾 Temp setpoint saved to SharedPreferences: ${temperature}°C");
+    } catch (e) {
+      print("❌ Failed to save temp setpoint: $e");
+    }
+
     notifyListeners();
 
-    // 4. Send to ESP32 (e.g. 25°C → "250" for 10x scaling)
     final String temperatureValue = (temperature * 10).round().toString();
     print('📤 Sending S_TEMP_SETPT = $temperatureValue to ESP32');
 
     await _sendControl("S_TEMP_SETPT", temperatureValue);
   }
 
-  // Request temperature status (called in initState)
   Future<void> requestTemperatureStatus() async {
     print('🌡️ Requesting temperature status');
     await refreshData();
@@ -161,19 +258,19 @@ class ESP32Provider with ChangeNotifier {
   Future<void> _checkConnection() async {
     try {
       final response = await http
-          .get(Uri.parse('http://$esp32IP/connection-test'))
+          .get(Uri.parse('$esp32BaseUrl/connection-test'))
           .timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         if (!_isConnected) {
           _isConnected = true;
-          print("✅ Connected to ESP32");
+          print("✅ Connected to ESP32 at $_esp32IP");
           notifyListeners();
         }
       }
     } catch (e) {
       if (_isConnected) {
         _isConnected = false;
-        print("❌ Disconnected from ESP32: $e");
+        print("❌ Disconnected from ESP32 at $_esp32IP: $e");
         notifyListeners();
       }
     }
@@ -190,7 +287,7 @@ class ESP32Provider with ChangeNotifier {
     try {
       print('📡 Trying /all-parameters...');
       final response = await http
-          .get(Uri.parse('http://$esp32IP/all-parameters'))
+          .get(Uri.parse('$esp32BaseUrl/all-parameters'))
           .timeout(const Duration(seconds: 2));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -207,7 +304,7 @@ class ESP32Provider with ChangeNotifier {
     try {
       print('📡 Trying /data...');
       final response = await http
-          .get(Uri.parse('http://$esp32IP/data'))
+          .get(Uri.parse('$esp32BaseUrl/data'))
           .timeout(const Duration(seconds: 2));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -225,7 +322,7 @@ class ESP32Provider with ChangeNotifier {
     try {
       print('📡 Trying /sensor-data...');
       final response = await http
-          .get(Uri.parse('http://$esp32IP/sensor-data'))
+          .get(Uri.parse('$esp32BaseUrl/sensor-data'))
           .timeout(const Duration(seconds: 2));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -261,7 +358,6 @@ class ESP32Provider with ChangeNotifier {
         }
       }
 
-      // FIXED: Parse pressure value as int to remove leading zeros
       if (data['pressure2'] != null) {
         int pressureInt = int.tryParse(data['pressure2'].toString()) ?? 0;
         String newPressure = pressureInt.toString();
@@ -290,6 +386,77 @@ class ESP32Provider with ChangeNotifier {
           }
         }
       }
+
+      // ── BME688 Air Quality data ──────────────────────────────────────────
+      if (data['iaq'] != null) {
+        double newIaq = (data['iaq'] as num).toDouble();
+        if (_iaq != newIaq) {
+          _iaq = newIaq;
+          changed = true;
+          print("🌬️ IAQ updated: $_iaq");
+        }
+      }
+
+      if (data['static_iaq'] != null) {
+        double newStaticIaq = (data['static_iaq'] as num).toDouble();
+        if (_staticIaq != newStaticIaq) {
+          _staticIaq = newStaticIaq;
+          changed = true;
+        }
+      }
+
+      if (data['co2_eq'] != null) {
+        double newCo2Eq = (data['co2_eq'] as num).toDouble();
+        if (_co2Eq != newCo2Eq) {
+          _co2Eq = newCo2Eq;
+          changed = true;
+        }
+      }
+
+      if (data['voc_eq'] != null) {
+        double newVocEq = (data['voc_eq'] as num).toDouble();
+        if (_vocEq != newVocEq) {
+          _vocEq = newVocEq;
+          if (_airValid) {
+            _vocEqBuffer.add(newVocEq);
+            if (_vocEqBuffer.length > _vocBufferSize) {
+              _vocEqBuffer.removeAt(0);
+            }
+          }
+          changed = true;
+          print(
+            "📟 VOC eq=$newVocEq ppm | buffer=${_vocEqBuffer.length} | avg=${vocEqAvg.toStringAsFixed(2)}",
+          );
+        }
+      }
+
+      if (data['gas_percent'] != null) {
+        double newGasPercent = (data['gas_percent'] as num).toDouble();
+        if (_gasPercent != newGasPercent) {
+          _gasPercent = newGasPercent;
+          changed = true;
+        }
+      }
+
+      if (data['air_quality'] != null) {
+        String newAirQuality = data['air_quality'].toString();
+        if (_airQuality != newAirQuality) {
+          _airQuality = newAirQuality;
+          changed = true;
+        }
+      }
+
+      if (data['air_valid'] != null) {
+        bool newValid = data['air_valid'] == true;
+        if (_airValid != newValid) {
+          _airValid = newValid;
+          if (newValid && _vocEqBuffer.isEmpty) {
+            print("🌬️ BME688 air_valid = true, buffer ready");
+          }
+          changed = true;
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
 
       // ── Humidity setpoint — GUARDED ──────────────────────────────────────
       if (data['humidity_setpoint'] != null) {
@@ -330,19 +497,15 @@ class ESP32Provider with ChangeNotifier {
         }
       }
 
-      // Parse light status and update backward compatibility variables
       if (data['light_status'] != null && data['light_status'] is List) {
         final lightList = data['light_status'] as List;
         for (int i = 0; i < lightList.length && i < _lightStates.length; i++) {
           bool newState = lightList[i] == 1 || lightList[i] == "1";
           if (_lightStates[i] != newState) {
             _lightStates[i] = newState;
-
-            // Update backward compatibility variables for lights 8, 9, 10
-            if (i == 7) _defumigation = newState; // Light 8 (index 7)
-            if (i == 8) _dayNightMode = newState; // Light 9 (index 8)
-            if (i == 9) _systemPower = newState; // Light 10 (index 9)
-
+            if (i == 7) _defumigation = newState;
+            if (i == 8) _dayNightMode = newState;
+            if (i == 9) _systemPower = newState;
             changed = true;
           }
         }
@@ -367,7 +530,6 @@ class ESP32Provider with ChangeNotifier {
         _currentHumidity = data['humidity'].toString();
       }
 
-      // FIXED: Parse pressure value as int to remove leading zeros
       if (data['pressure'] != null) {
         final pressureDouble =
             double.tryParse(data['pressure'].toString()) ?? 0.0;
@@ -381,6 +543,23 @@ class ESP32Provider with ChangeNotifier {
             data['pressure_positive'] == "1" ||
             data['pressure_positive'] == 1;
       }
+
+      // ── BME688 Air Quality data ──────────────────────────────────────────
+      _iaq = (data['iaq'] ?? 0).toDouble();
+      _staticIaq = (data['static_iaq'] ?? 0).toDouble();
+      _co2Eq = (data['co2_eq'] ?? 0).toDouble();
+      _vocEq = (data['voc_eq'] ?? 0).toDouble();
+      _gasPercent = (data['gas_percent'] ?? 0).toDouble();
+      _airQuality = data['air_quality'] ?? "--";
+      _airValid = data['air_valid'] ?? false;
+
+      if (_airValid && _vocEq > 0) {
+        _vocEqBuffer.add(_vocEq);
+        if (_vocEqBuffer.length > _vocBufferSize) {
+          _vocEqBuffer.removeAt(0);
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
 
       // ── Humidity setpoint — GUARDED ──────────────────────────────────────
       if (data['humidity_setpoint'] != null) {
@@ -417,16 +596,13 @@ class ESP32Provider with ChangeNotifier {
         }
       }
 
-      // Parse light status and update backward compatibility variables
       if (data['light_status'] != null && data['light_status'] is List) {
         final lightList = data['light_status'] as List;
         for (int i = 0; i < lightList.length && i < _lightStates.length; i++) {
           _lightStates[i] = lightList[i] == 1 || lightList[i] == "1";
-
-          // Update backward compatibility variables for lights 8, 9, 10
-          if (i == 7) _defumigation = _lightStates[i]; // Light 8
-          if (i == 8) _dayNightMode = _lightStates[i]; // Light 9
-          if (i == 9) _systemPower = _lightStates[i]; // Light 10
+          if (i == 7) _defumigation = _lightStates[i];
+          if (i == 8) _dayNightMode = _lightStates[i];
+          if (i == 9) _systemPower = _lightStates[i];
         }
       }
 
@@ -454,14 +630,12 @@ class ESP32Provider with ChangeNotifier {
                 .toStringAsFixed(1);
       }
 
-      // FIXED: Parse pressure value as int to remove leading zeros
       final pressureMatch = RegExp(r'C_PRESSURE_2:(\d+)').firstMatch(data);
       final pressureSignMatch = RegExp(
         r'C_PRESSURE_2_SIGN_BIT:(\d+)',
       ).firstMatch(data);
       if (pressureMatch != null) {
         final pressureInt = int.tryParse(pressureMatch.group(1) ?? '0') ?? 0;
-        _pressureValue = (pressureInt * 100).toInt().toString();
         _isPressurePositive = pressureSignMatch?.group(1) == '0';
       }
 
@@ -504,15 +678,12 @@ class ESP32Provider with ChangeNotifier {
         }
       }
 
-      // Parse light status and update backward compatibility variables
       for (int i = 1; i <= 10; i++) {
         final lightMatch = RegExp(
           r'S_Light_' + i.toString() + r'_ON_OFF:(\d)',
         ).firstMatch(data);
         if (lightMatch != null) {
           _lightStates[i - 1] = lightMatch.group(1) == "1";
-
-          // Update backward compatibility variables for lights 8, 9, 10
           if (i == 8) _defumigation = _lightStates[7];
           if (i == 9) _dayNightMode = _lightStates[8];
           if (i == 10) _systemPower = _lightStates[9];
@@ -535,7 +706,7 @@ class ESP32Provider with ChangeNotifier {
     print('🚀 Sending control: $key = $value');
     try {
       final response = await http
-          .post(Uri.parse('http://$esp32IP/control'), body: {key: value})
+          .post(Uri.parse('$esp32BaseUrl/control'), body: {key: value})
           .timeout(const Duration(seconds: 3));
 
       if (response.statusCode == 200) {
@@ -554,12 +725,9 @@ class ESP32Provider with ChangeNotifier {
               int.tryParse(key.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
           if (lightNumber >= 1 && lightNumber <= 10) {
             _lightStates[lightNumber - 1] = value == "1";
-
-            // Update backward compatibility variables for lights 8, 9, 10
             if (lightNumber == 8) _defumigation = value == "1";
             if (lightNumber == 9) _dayNightMode = value == "1";
             if (lightNumber == 10) _systemPower = value == "1";
-
             notifyListeners();
           }
         }
@@ -577,7 +745,7 @@ class ESP32Provider with ChangeNotifier {
     print('🚀 Sending multiple controls: $controls');
     try {
       final response = await http
-          .post(Uri.parse('http://$esp32IP/control'), body: controls)
+          .post(Uri.parse('$esp32BaseUrl/control'), body: controls)
           .timeout(const Duration(seconds: 3));
 
       if (response.statusCode == 200) {
@@ -587,8 +755,6 @@ class ESP32Provider with ChangeNotifier {
             final n = int.tryParse(key.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
             if (n >= 1 && n <= 10) {
               _lightStates[n - 1] = value == "1";
-
-              // Update backward compatibility variables for lights 8, 9, 10
               if (n == 8) _defumigation = value == "1";
               if (n == 9) _dayNightMode = value == "1";
               if (n == 10) _systemPower = value == "1";
@@ -609,17 +775,20 @@ class ESP32Provider with ChangeNotifier {
   Future<void> setHumiditySetpoint(double humidity) async {
     print('💧 setHumiditySetpoint called: $humidity%');
 
-    // 1. Update local value IMMEDIATELY
     _humiditySetpoint = humidity.toStringAsFixed(1);
-
-    // 2. Activate guard
     _humiditySetpointGuardUntil = DateTime.now().add(_setpointGuardDuration);
     print('🛡️ Humidity guard active until $_humiditySetpointGuardUntil');
 
-    // 3. Notify UI immediately
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble("humiditySetpoint", humidity);
+      print("💾 Humidity setpoint saved to SharedPreferences: ${humidity}%");
+    } catch (e) {
+      print("❌ Failed to save humidity setpoint: $e");
+    }
+
     notifyListeners();
 
-    // 4. Send to ESP32 (e.g. 55.0 → "550")
     final String humidityValue = (humidity * 10).round().toString().padLeft(
       3,
       '0',
@@ -637,12 +806,9 @@ class ESP32Provider with ChangeNotifier {
       return;
     }
     _lightStates[lightNumber - 1] = value;
-
-    // Update backward compatibility variables for lights 8, 9, 10
-    if (lightNumber == 8) _defumigation = value; // Light 8 is defumigation
-    if (lightNumber == 9) _dayNightMode = value; // Light 9 is day/night mode
-    if (lightNumber == 10) _systemPower = value; // Light 10 is system power
-
+    if (lightNumber == 8) _defumigation = value;
+    if (lightNumber == 9) _dayNightMode = value;
+    if (lightNumber == 10) _systemPower = value;
     notifyListeners();
     await _sendControl("S_Light_${lightNumber}_ON_OFF", value ? "1" : "0");
   }
@@ -653,12 +819,9 @@ class ESP32Provider with ChangeNotifier {
     lightStates.forEach((lightNumber, value) {
       if (lightNumber >= 1 && lightNumber <= 10) {
         _lightStates[lightNumber - 1] = value;
-
-        // Update backward compatibility variables for lights 8, 9, 10
         if (lightNumber == 8) _defumigation = value;
         if (lightNumber == 9) _dayNightMode = value;
         if (lightNumber == 10) _systemPower = value;
-
         controls["S_Light_${lightNumber}_ON_OFF"] = value ? "1" : "0";
       }
     });
@@ -666,18 +829,13 @@ class ESP32Provider with ChangeNotifier {
     if (controls.isNotEmpty) await _sendMultipleControls(controls);
   }
 
-  // FIXED: This method now toggles ALL 10 lights
+  // ✅ Only toggles lights 1-4, NOT system controls (8, 9, 10)
   Future<void> toggleAllLights(bool value) async {
     Map<String, String> controls = {};
-    // Fix: Toggle ALL 10 lights, not just first 4
     for (int i = 1; i <= 4; i++) {
       _lightStates[i - 1] = value;
       controls["S_Light_${i}_ON_OFF"] = value ? "1" : "0";
     }
-    // Update backward compatibility variables for lights 8, 9, 10
-    _defumigation = value; // Light 8
-    _dayNightMode = value; // Light 9
-    _systemPower = value; // Light 10
     notifyListeners();
     await _sendMultipleControls(controls);
   }
@@ -689,17 +847,14 @@ class ESP32Provider with ChangeNotifier {
       _lightStates[i] = pattern[i];
       controls["S_Light_${i + 1}_ON_OFF"] = pattern[i] ? "1" : "0";
     }
-
-    // Update backward compatibility variables for lights 8, 9, 10
-    if (pattern.length > 7) _defumigation = pattern[7]; // Light 8 (index 7)
-    if (pattern.length > 8) _dayNightMode = pattern[8]; // Light 9 (index 8)
-    if (pattern.length > 9) _systemPower = pattern[9]; // Light 10 (index 9)
-
+    if (pattern.length > 7) _defumigation = pattern[7];
+    if (pattern.length > 8) _dayNightMode = pattern[8];
+    if (pattern.length > 9) _systemPower = pattern[9];
     notifyListeners();
     await _sendMultipleControls(controls);
   }
 
-  // Backward compatibility toggle methods - now correctly mapped to lights 8, 9, 10
+  // Backward compatibility toggle methods
   Future<void> toggleDefumigation(bool value) async => toggleLight(8, value);
   Future<void> toggleSystemPower(bool value) async => toggleLight(10, value);
   Future<void> toggleDayNightMode(bool value) async => toggleLight(9, value);
@@ -709,7 +864,7 @@ class ESP32Provider with ChangeNotifier {
   Future<void> _fetchLegacyData() async {
     try {
       final response = await http
-          .get(Uri.parse('http://$esp32IP/data'))
+          .get(Uri.parse('$esp32BaseUrl/data'))
           .timeout(const Duration(seconds: 5));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -722,17 +877,12 @@ class ESP32Provider with ChangeNotifier {
     }
   }
 
-  // FIXED: Updated to remove leading zeros from pressure value
   String getFormattedPressure() {
-    // Parse the pressure value to remove leading zeros
-    int pressureInt = int.tryParse(_pressureValue) ?? 0;
-    String formattedValue = pressureInt.toString();
-
-    return _isPressurePositive ? formattedValue : "-$formattedValue";
+    return _pressureValue;
   }
 
   Color getPressureColor() {
-    return _isPressurePositive ? Colors.greenAccent : Colors.redAccent;
+    return _isPressurePositive ? Colors.white : Colors.white;
   }
 
   @override

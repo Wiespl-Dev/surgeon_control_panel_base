@@ -74,23 +74,14 @@ Future<void> main() async {
 
   await LocalizationService.instance.init();
 
-  // Create GlobalUsbProvider instance early and initialize it
-  final globalUsbProvider = GlobalUsbProvider();
-
-  // Use a simple approach for boot detection - extended delays
-  await globalUsbProvider.initSharedPreferences();
-
   runApp(
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => StopwatchProvider()),
         ChangeNotifierProvider(create: (_) => ClockProvider()),
-        ChangeNotifierProvider(create: (context) => globalUsbProvider),
         ChangeNotifierProvider(create: (context) => ESP32State()),
         ChangeNotifierProvider(create: (context) => ESP32Provider()),
-
         ChangeNotifierProvider(create: (context) => MusicPlayerProvider()),
-        // MusicPlayerProvider
       ],
       child: const MyApp(),
     ),
@@ -104,10 +95,9 @@ class MyApp extends StatelessWidget {
     final prefs = await SharedPreferences.getInstance();
     final code = prefs.getString("uniqueCode");
     final mode = prefs.getString("mode");
+    final espIp = prefs.getString("espIp");
 
-    if (code != null && mode != null) {
-      /// Return the appropriate screen based on the saved mode
-
+    if (code != null && mode != null && espIp != null) {
       switch (mode) {
         case 'Main':
           return Home();
@@ -219,9 +209,49 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   final TextEditingController _codeController = TextEditingController();
+  final TextEditingController _espIpController = TextEditingController();
+  final TextEditingController _doctorController = TextEditingController();
+  final TextEditingController _patientController = TextEditingController();
+  final TextEditingController _surgeryController = TextEditingController();
+
   String? _selectedMode;
+  String? _selectedOT;
 
   final List<String> _modes = ['Main', 'Entrance', 'Passage', 'Bronchi'];
+  final List<String> _otNumbers = [
+    'OT - 1',
+    'OT - 2',
+    'OT - 3',
+    'OT - 4',
+    'OT - 5',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedData();
+  }
+
+  Future<void> _loadSavedData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedCode = prefs.getString("uniqueCode");
+    final savedEspIp = prefs.getString("espIp");
+    final savedMode = prefs.getString("mode");
+    final savedOT = prefs.getString("otNumber");
+    final savedDoctor = prefs.getString("doctorName");
+    final savedPatient = prefs.getString("patientName");
+    final savedSurgery = prefs.getString("surgeryName");
+
+    setState(() {
+      if (savedCode != null) _codeController.text = savedCode;
+      if (savedEspIp != null) _espIpController.text = savedEspIp;
+      if (savedMode != null) _selectedMode = savedMode;
+      if (savedOT != null) _selectedOT = savedOT;
+      // if (savedDoctor != null) _doctorController.text = savedDoctor;
+      // if (savedPatient != null) _patientController.text = savedPatient;
+      // if (savedSurgery != null) _surgeryController.text = savedSurgery;
+    });
+  }
 
   Future<void> _onLogin() async {
     if (_codeController.text.isEmpty || _selectedMode == null) {
@@ -234,11 +264,30 @@ class _LoginPageState extends State<LoginPage> {
       return;
     }
 
+    String espIp = _espIpController.text.trim();
+    if (espIp.isNotEmpty && !_isValidIpAddress(espIp)) {
+      Get.snackbar(
+        "Error",
+        "Please enter a valid IP address (e.g., 192.168.4.1)",
+        snackPosition: SnackPosition.BOTTOM,
+        backgroundColor: Colors.red.shade100,
+      );
+      return;
+    }
+
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString("uniqueCode", _codeController.text);
     await prefs.setString("mode", _selectedMode!);
+    if (espIp.isNotEmpty) {
+      await prefs.setString("espIp", espIp);
+    }
 
-    // Navigate to different screens based on the selected mode
+    // Save OR info fields
+    await prefs.setString("otNumber", _selectedOT ?? '');
+    await prefs.setString("doctorName", _doctorController.text.trim());
+    await prefs.setString("patientName", _patientController.text.trim());
+    await prefs.setString("surgeryName", _surgeryController.text.trim());
+
     Widget nextScreen;
     switch (_selectedMode) {
       case 'Main':
@@ -263,6 +312,39 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
+  bool _isValidIpAddress(String ip) {
+    final RegExp ipRegex = RegExp(
+      r'^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$',
+    );
+    return ipRegex.hasMatch(ip);
+  }
+
+  @override
+  void dispose() {
+    _codeController.dispose();
+    _espIpController.dispose();
+    _doctorController.dispose();
+    _patientController.dispose();
+    _surgeryController.dispose();
+    super.dispose();
+  }
+
+  InputDecoration _fieldDecoration({
+    required String label,
+    required IconData icon,
+    String? hint,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      labelStyle: const TextStyle(color: Colors.blueGrey),
+      prefixIcon: Icon(icon, color: Colors.blueGrey),
+      filled: true,
+      fillColor: const Color.fromARGB(142, 255, 255, 255),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -272,7 +354,7 @@ class _LoginPageState extends State<LoginPage> {
           // Background image
           Image.asset("assets/bgi.jpg", fit: BoxFit.cover),
 
-          // Semi-transparent overlay for readability
+          // Semi-transparent overlay
           Container(color: Colors.black.withOpacity(0.4)),
 
           // Login Card
@@ -287,7 +369,7 @@ class _LoginPageState extends State<LoginPage> {
                 elevation: 12,
                 child: Padding(
                   padding: const EdgeInsets.all(24),
-                  child: Container(
+                  child: SizedBox(
                     width: MediaQuery.of(context).size.width * 0.4,
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
@@ -302,46 +384,111 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                         const SizedBox(height: 30),
 
-                        // Unique Code Field
+                        // ── Unique Code ──────────────────────────────────
                         TextField(
                           controller: _codeController,
-                          style: const TextStyle(
-                            color: Colors.black,
-                          ), // input text in black
+                          style: const TextStyle(color: Colors.black),
+                          decoration: _fieldDecoration(
+                            label: "Enter Unique Code",
+                            icon: Icons.vpn_key,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+
+                        // ── ESP32 IP ─────────────────────────────────────
+                        TextField(
+                          controller: _espIpController,
+                          style: const TextStyle(color: Colors.black),
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                              RegExp(r'[0-9.]'),
+                            ),
+                          ],
+                          decoration: _fieldDecoration(
+                            label: "ESP32 IP Address",
+                            icon: Icons.settings_ethernet,
+                            hint: "192.168.4.1",
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+
+                        // ── OT Number Dropdown ───────────────────────────
+                        DropdownButtonFormField<String>(
+                          value: _selectedOT,
+                          style: const TextStyle(color: Colors.black),
+                          items: _otNumbers
+                              .map(
+                                (ot) => DropdownMenuItem(
+                                  value: ot,
+                                  child: Text(
+                                    ot,
+                                    style: const TextStyle(color: Colors.black),
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (val) => setState(() => _selectedOT = val),
                           decoration: InputDecoration(
-                            labelText: "Enter Unique Code", // label text
-                            labelStyle: const TextStyle(
-                              color: Colors.blueGrey,
-                            ), // optional label color
+                            labelText: "Select OT Number",
+                            labelStyle: const TextStyle(color: Colors.blueGrey),
                             prefixIcon: const Icon(
-                              Icons.vpn_key,
+                              Icons.meeting_room_outlined,
                               color: Colors.blueGrey,
                             ),
                             filled: true,
-                            fillColor: const Color.fromARGB(142, 255, 255, 255),
+                            fillColor: const Color.fromARGB(158, 255, 255, 255),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
                             ),
                           ),
                         ),
-
                         const SizedBox(height: 20),
 
-                        // Mode Dropdown
+                        // ── Doctor Name ──────────────────────────────────
+                        // TextField(
+                        //   controller: _doctorController,
+                        //   style: const TextStyle(color: Colors.black),
+                        //   decoration: _fieldDecoration(
+                        //     label: "Doctor Name",
+                        //     icon: Icons.medical_services_outlined,
+                        //   ),
+                        // ),
+                        // const SizedBox(height: 20),
+
+                        // ── Patient Name ─────────────────────────────────
+                        // TextField(
+                        //   controller: _patientController,
+                        //   style: const TextStyle(color: Colors.black),
+                        //   decoration: _fieldDecoration(
+                        //     label: "Patient Name",
+                        //     icon: Icons.person_outline,
+                        //   ),
+                        // ),
+                        // const SizedBox(height: 20),
+
+                        // ── Surgery Name ─────────────────────────────────
+                        // TextField(
+                        //   controller: _surgeryController,
+                        //   style: const TextStyle(color: Colors.black),
+                        //   decoration: _fieldDecoration(
+                        //     label: "Surgery Name",
+                        //     icon: Icons.local_hospital_outlined,
+                        //   ),
+                        // ),
+                        // const SizedBox(height: 20),
+
+                        // ── Mode Dropdown ────────────────────────────────
                         DropdownButtonFormField<String>(
                           value: _selectedMode,
-                          style: const TextStyle(
-                            color: Colors.black,
-                          ), // selected text in black
+                          style: const TextStyle(color: Colors.black),
                           items: _modes
                               .map(
                                 (mode) => DropdownMenuItem(
                                   value: mode,
                                   child: Text(
                                     mode,
-                                    style: const TextStyle(
-                                      color: Colors.black,
-                                    ), // dropdown items in black
+                                    style: const TextStyle(color: Colors.black),
                                   ),
                                 ),
                               )
@@ -349,7 +496,7 @@ class _LoginPageState extends State<LoginPage> {
                           onChanged: (val) =>
                               setState(() => _selectedMode = val),
                           decoration: InputDecoration(
-                            labelText: "Select Mode", // optional label
+                            labelText: "Select Mode",
                             labelStyle: const TextStyle(color: Colors.blueGrey),
                             prefixIcon: const Icon(
                               Icons.settings_applications_outlined,
@@ -364,7 +511,7 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                         const SizedBox(height: 30),
 
-                        // Login Button
+                        // ── Login Button ─────────────────────────────────
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton(
