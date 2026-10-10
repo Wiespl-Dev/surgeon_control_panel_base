@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
-import 'dart:math' as math;
 import 'package:syncfusion_flutter_gauges/gauges.dart';
-import 'package:wiespl_surgeon_panel/services/esptwo.dart';
+import 'package:wiespl_surgeon_panel/services/nnn.dart'; // Update this import path as needed
+import 'package:wiespl_surgeon_panel/widgets/gauge_arc_hit.dart';
 
 class TempGaugeScreen extends StatefulWidget {
   const TempGaugeScreen({super.key});
@@ -17,9 +17,20 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
   DateTime? _lastSetTime;
   static const Duration _minSetInterval = Duration(seconds: 2);
 
-  // Safe bounds as per your ESP32 configuration
-  static const double _minTemperature = 18.0;
-  static const double _maxTemperature = 28.0;
+  static const double _minTemperature = 16.0;
+  static const double _maxTemperature = 24.0; // FIXED: was 28.0
+
+  // Local unconfirmed gauge value
+  double _pendingTemperature = _minTemperature;
+
+  // Provider reference for listener-based sync with PLC / SharedPreferences
+  OTPanelProvider? _provider;
+
+  // Track pending async operations so we can cancel them on dispose
+  bool _disposed = false;
+
+  // True while a drag that started on the gauge bar is in progress
+  bool _gaugeGrabbed = false;
 
   @override
   void initState() {
@@ -27,64 +38,95 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
     _initializeData();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final p = Provider.of<OTPanelProvider>(context, listen: false);
+    if (!identical(p, _provider)) {
+      _provider?.removeListener(_onProviderChanged);
+      _provider = p;
+      _provider!.addListener(_onProviderChanged);
+      // Sync immediately with whatever the provider currently has
+      _onProviderChanged();
+    }
+  }
+
+  @override
+  void dispose() {
+    _provider?.removeListener(_onProviderChanged);
+    _disposed = true;
+    super.dispose();
+  }
+
+  /// Called whenever OTPanelProvider calls notifyListeners().
+  /// This is what makes the gauge react to PLC-side setpoint changes
+  /// and to values loaded back from SharedPreferences.
+  void _onProviderChanged() {
+    if (_disposed || !mounted || _isSettingValue) return;
+
+    final remote = _provider!.temperatureSetpoint;
+    if (remote < _minTemperature || remote > _maxTemperature) return;
+
+    // Only override the local pending value if it actually differs,
+    // so we don't fight with the user's in-progress drag.
+    if ((remote - _pendingTemperature).abs() >= 0.5) {
+      setState(() {
+        _pendingTemperature = remote;
+      });
+    }
+  }
+
   void _initializeData() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final espProvider = Provider.of<ESP32Provider>(context, listen: false);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (_disposed || !mounted) return;
 
-      // 1. Request status from hardware immediately
-      espProvider.requestTemperatureStatus();
+      final otPanelProvider = Provider.of<OTPanelProvider>(
+        context,
+        listen: false,
+      );
 
-      // 2. Wait for a heartbeat/response before syncing the UI gauge
-      // We use a slightly longer delay to ensure the provider has updated its variables
-      Future.delayed(const Duration(milliseconds: 1000), () {
-        if (mounted) {
-          final provider = Provider.of<ESP32Provider>(context, listen: false);
-          double initialTemp = provider.temperatureSetpointAsDouble;
+      // This should load persisted value from SharedPreferences AND
+      // fetch the current setpoint from the PLC.
+      await otPanelProvider.refreshData();
 
-          // CRITICAL: Only update the gauge if we got a valid non-zero value.
-          // If initialTemp is 0.0, the ESP hasn't responded yet; don't sync it.
-          if (initialTemp >= _minTemperature &&
-              initialTemp <= _maxTemperature) {
-            provider.updatePendingTemperature(initialTemp);
-          } else {
-            // Fallback to safe default for the UI only, doesn't send to ESP
-            provider.updatePendingTemperature(_minTemperature);
-          }
+      if (_disposed || !mounted) return;
+
+      // After refresh, sync our local pending value from the provider.
+      // The listener added in didChangeDependencies will also fire,
+      // but doing it explicitly here covers the case where the value
+      // didn't change (so notifyListeners might not fire).
+      final double initialTemp = otPanelProvider.temperatureSetpoint;
+      setState(() {
+        if (initialTemp >= _minTemperature &&
+            initialTemp <= _maxTemperature) {
+          _pendingTemperature = initialTemp;
+        } else {
+          _pendingTemperature = _minTemperature;
         }
       });
     });
   }
 
   void _handleGaugeInteraction(Offset localPosition, Size gaugeSize) {
-    final center = gaugeSize.center(Offset.zero);
-    final angle = (localPosition - center).direction;
-
-    double startAngleRad = 150 * (math.pi / 180);
-    double endAngleRad = 30 * (math.pi / 180);
-
-    double normalizedAngle = angle;
-    if (normalizedAngle < startAngleRad) {
-      normalizedAngle += 2 * math.pi;
-    }
-
-    double percentage =
-        (normalizedAngle - startAngleRad) /
-        (endAngleRad - startAngleRad + 2 * math.pi);
-
+    final fraction = GaugeArcHit.fraction(localPosition, gaugeSize);
     double value =
-        _minTemperature + (percentage * (_maxTemperature - _minTemperature));
+        _minTemperature + (fraction * (_maxTemperature - _minTemperature));
     value = value.roundToDouble().clamp(_minTemperature, _maxTemperature);
 
-    final espProvider = Provider.of<ESP32Provider>(context, listen: false);
-    espProvider.updatePendingTemperature(value);
+    setState(() {
+      _pendingTemperature = value;
+    });
   }
 
   Future<void> _setTemperature() async {
-    final espProvider = Provider.of<ESP32Provider>(context, listen: false);
+    if (_isSettingValue || _disposed || !mounted) return;
 
-    if (_isSettingValue) return;
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
+    );
 
-    if (!espProvider.isConnected) {
+    if (!otPanelProvider.secondEspOnline) {
       Get.snackbar(
         "Error",
         "ESP not connected",
@@ -101,22 +143,44 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
       return;
     }
 
-    setState(() => _isSettingValue = true);
+    // Capture the value before any await — provider state can change
+    final double temperatureToSet = _pendingTemperature;
+    final int sentValue = (temperatureToSet * 10).round();
+
+    if (sentValue < 160 || sentValue > 240) {
+      Get.snackbar(
+        "Error",
+        "Value must be between 16.0°C and 24.0°C.",
+        snackPosition: SnackPosition.TOP,
+        backgroundColor: Colors.red,
+        colorText: Colors.white,
+      );
+      return;
+    }
+
+    if (mounted) setState(() => _isSettingValue = true);
 
     try {
-      final temperatureToSet = espProvider.pendingTemperature;
-      final int sentValue = (temperatureToSet * 10).round();
-
-      // EXTRA SAFETY: If for some reason the value is 0 or extremely low,
-      // abort to prevent hardware shutdown.
-      if (sentValue < 180) {
-        throw Exception('Value $sentValue is unsafe. Minimum is 180 (18.0°C).');
-      }
-
       print("🎯 Sending $sentValue to ESP32...");
       _lastSetTime = DateTime.now();
 
-      await espProvider.setTemperature(temperatureToSet);
+      final ok = await otPanelProvider.setTemperatureSetpoint(
+        temperatureToSet,
+      );
+
+      // Check again after await — widget may have been disposed during the call
+      if (_disposed || !mounted) return;
+
+      if (!ok) {
+        Get.snackbar(
+          "Set Failed",
+          "ESP32 did not accept the new temperature setpoint",
+          snackPosition: SnackPosition.TOP,
+          backgroundColor: Colors.red,
+          colorText: Colors.white,
+        );
+        return;
+      }
 
       Get.snackbar(
         "Success",
@@ -127,19 +191,21 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
         duration: const Duration(seconds: 2),
       );
 
-      await Future.delayed(const Duration(milliseconds: 1500));
+      // Pop immediately — no delay. The snackbar shows on the previous screen.
       if (mounted) Navigator.pop(context);
     } catch (e) {
       print("❌ Error: $e");
-      Get.snackbar(
-        "Set Failed",
-        e.toString(),
-        snackPosition: SnackPosition.TOP,
-        backgroundColor: Colors.red,
-        colorText: Colors.white,
-      );
+      if (!_disposed && mounted) {
+        Get.snackbar(
+          "Set Failed",
+          e.toString(),
+          snackPosition: SnackPosition.TOP,
+          backgroundColor: Colors.red,
+          colorText: Colors.white,
+        );
+      }
     } finally {
-      if (mounted) setState(() => _isSettingValue = false);
+      if (!_disposed && mounted) setState(() => _isSettingValue = false);
     }
   }
 
@@ -167,18 +233,18 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
                 ),
               ],
             ),
-            child: Consumer<ESP32Provider>(
-              builder: (context, espProvider, child) {
+            child: Consumer<OTPanelProvider>(
+              builder: (context, otPanelProvider, child) {
                 return Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _buildHeader(espProvider),
+                    _buildHeader(otPanelProvider),
                     const SizedBox(height: 20),
-                    _buildInfoPanel(espProvider),
+                    _buildInfoPanel(otPanelProvider),
                     const SizedBox(height: 10),
-                    _buildGauge(espProvider),
+                    _buildGauge(otPanelProvider),
                     const SizedBox(height: 30),
-                    _buildActionButtons(espProvider),
+                    _buildActionButtons(otPanelProvider),
                   ],
                 );
               },
@@ -189,13 +255,13 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
     );
   }
 
-  Widget _buildHeader(ESP32Provider espProvider) {
+  Widget _buildHeader(OTPanelProvider otPanelProvider) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Icon(
           Icons.circle,
-          color: espProvider.isConnected ? Colors.green : Colors.red,
+          color: otPanelProvider.secondEspOnline ? Colors.green : Colors.red,
           size: 12,
         ),
         const Text(
@@ -214,7 +280,7 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
     );
   }
 
-  Widget _buildInfoPanel(ESP32Provider espProvider) {
+  Widget _buildInfoPanel(OTPanelProvider otPanelProvider) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
       decoration: BoxDecoration(
@@ -226,13 +292,13 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
         children: [
           _infoColumn(
             "Current",
-            "${espProvider.currentTemperature}°C",
+            "${otPanelProvider.temperature.toStringAsFixed(1)}°C",
             Colors.white,
           ),
           Container(width: 1, height: 30, color: Colors.white30),
           _infoColumn(
             "Setpoint",
-            "${espProvider.temperatureSetpointAsDouble.toStringAsFixed(0)}°C",
+            "${otPanelProvider.temperatureSetpoint.toStringAsFixed(0)}°C",
             Colors.amber,
           ),
         ],
@@ -260,22 +326,33 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
     );
   }
 
-  Widget _buildGauge(ESP32Provider espProvider) {
+  Widget _buildGauge(OTPanelProvider otPanelProvider) {
     return SizedBox(
       height: 250,
       child: LayoutBuilder(
         builder: (context, constraints) {
+          final size = constraints.biggest;
+          // Only touches on the bar count; a drag must start on the bar but
+          // may then wander off it.
           return GestureDetector(
-            onPanUpdate: (details) => _handleInteraction(
-              context,
-              details.globalPosition,
-              constraints,
-            ),
-            onTapDown: (details) => _handleInteraction(
-              context,
-              details.globalPosition,
-              constraints,
-            ),
+            onTapDown: (details) {
+              if (GaugeArcHit.isOnArc(details.localPosition, size)) {
+                _handleGaugeInteraction(details.localPosition, size);
+              }
+            },
+            onPanStart: (details) {
+              _gaugeGrabbed = GaugeArcHit.isOnArc(details.localPosition, size);
+              if (_gaugeGrabbed) {
+                _handleGaugeInteraction(details.localPosition, size);
+              }
+            },
+            onPanUpdate: (details) {
+              if (_gaugeGrabbed) {
+                _handleGaugeInteraction(details.localPosition, size);
+              }
+            },
+            onPanEnd: (_) => _gaugeGrabbed = false,
+            onPanCancel: () => _gaugeGrabbed = false,
             child: SfRadialGauge(
               axes: [
                 RadialAxis(
@@ -293,14 +370,14 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
                   ),
                   pointers: [
                     RangePointer(
-                      value: espProvider.pendingTemperature,
+                      value: _pendingTemperature,
                       width: 0.15,
                       color: Colors.white,
                       cornerStyle: CornerStyle.bothCurve,
                       sizeUnit: GaugeSizeUnit.factor,
                     ),
                     MarkerPointer(
-                      value: espProvider.pendingTemperature,
+                      value: _pendingTemperature,
                       markerType: MarkerType.circle,
                       color: Colors.white,
                       markerHeight: 20,
@@ -317,7 +394,7 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            espProvider.pendingTemperature.toStringAsFixed(0),
+                            _pendingTemperature.toStringAsFixed(0),
                             style: const TextStyle(
                               fontSize: 32,
                               fontWeight: FontWeight.bold,
@@ -344,41 +421,28 @@ class _TempGaugeScreenState extends State<TempGaugeScreen> {
     );
   }
 
-  void _handleInteraction(
-    BuildContext context,
-    Offset globalPos,
-    BoxConstraints constraints,
-  ) {
-    final box = context.findRenderObject() as RenderBox;
-    final localPos = box.globalToLocal(globalPos);
-    _handleGaugeInteraction(localPos, constraints.biggest);
-  }
-
-  Widget _buildActionButtons(ESP32Provider espProvider) {
+  Widget _buildActionButtons(OTPanelProvider otPanelProvider) {
     return Column(
       children: [
         SizedBox(
           width: double.infinity,
           child: ElevatedButton(
-            onPressed: espProvider.isConnected && !_isSettingValue
+            onPressed: otPanelProvider.secondEspOnline && !_isSettingValue
                 ? _setTemperature
                 : null,
             style: ElevatedButton.styleFrom(
-              backgroundColor: _isSettingValue
-                  ? Colors.blue
-                  : (espProvider.isConnected ? Colors.black : Colors.grey),
+              backgroundColor: otPanelProvider.secondEspOnline
+                  ? Colors.black
+                  : Colors.grey,
               padding: const EdgeInsets.symmetric(vertical: 16),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(30),
               ),
             ),
-            child: _isSettingValue
-                ? const CircularProgressIndicator(color: Colors.white)
-                : Text(
-                    espProvider.isConnected
-                        ? "SET TEMPERATURE"
-                        : "DISCONNECTED",
-                  ),
+            child: Text(
+              otPanelProvider.secondEspOnline ? "SET TEMPERATURE" : "DISCONNECTED",
+              style: const TextStyle(color: Colors.white),
+            ),
           ),
         ),
         const SizedBox(height: 10),

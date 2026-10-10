@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
-import 'dart:math' as math;
 import 'package:syncfusion_flutter_gauges/gauges.dart';
-import 'package:wiespl_surgeon_panel/services/esptwo.dart'; // Update this import path as needed
+import 'package:wiespl_surgeon_panel/services/nnn.dart';// Update this import path as needed
+import 'package:wiespl_surgeon_panel/widgets/gauge_arc_hit.dart';
 
 class HumidityGaugeScreen extends StatefulWidget {
   const HumidityGaugeScreen({super.key});
@@ -15,6 +15,8 @@ class HumidityGaugeScreen extends StatefulWidget {
 class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
   bool _isSettingValue = false;
   bool _isDragging = false;
+  // True while a drag that started on the gauge bar is in progress
+  bool _gaugeGrabbed = false;
   DateTime? _lastSetTime;
   static const Duration _minSetInterval = Duration(seconds: 2);
 
@@ -35,15 +37,13 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
   }
 
   void _initializeData() {
-    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-
-    // Start polling if not already started
-    esp32Provider.startPolling();
-
-    // Initialize pending humidity from ESP32's setpoint if available
-    double initialHumidity = _convertFromSetpointFormat(
-      esp32Provider.humiditySetpoint,
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
     );
+
+    // Initialize pending humidity from the provider's current setpoint
+    double initialHumidity = otPanelProvider.humiditySetpoint;
 
     // Clamp to our range and round to nearest 0.5
     initialHumidity = _clampAndRoundToStep(initialHumidity);
@@ -52,31 +52,8 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
       _pendingHumidity = initialHumidity;
     });
 
-    // Request initial data
-    esp32Provider.refreshData();
-  }
-
-  // Convert from "500" format (50.0%) to double
-  double _convertFromSetpointFormat(String setpoint) {
-    if (setpoint.length >= 2) {
-      try {
-        int value = int.parse(setpoint);
-        return value / 10.0;
-      } catch (e) {
-        return 50.0;
-      }
-    }
-    return 50.0;
-  }
-
-  // Convert to "500" format (50.5% -> 505)
-  String _convertToSetpointFormat(double value) {
-    // Ensure value is rounded to 0.5 increments first
-    value = _roundToStep(value);
-
-    // 50.5 -> 505, 50.0 -> 500
-    int setpointValue = (value * 10).round();
-    return setpointValue.toString().padLeft(3, '0');
+    // Request fresh data (polling is already started by the provider itself)
+    otPanelProvider.refreshData();
   }
 
   // Clamp value to range and round to nearest 0.5
@@ -91,23 +68,10 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
   }
 
   void _handleGaugeInteraction(Offset localPosition, Size gaugeSize) {
-    final center = gaugeSize.center(Offset.zero);
-    final angle = (localPosition - center).direction;
+    // Position along the bar, 0 (start) to 1 (end)
+    final percentage = GaugeArcHit.fraction(localPosition, gaugeSize);
 
-    double startAngleRad = 150 * (math.pi / 180);
-    double endAngleRad = 30 * (math.pi / 180);
-
-    double normalizedAngle = angle;
-    if (normalizedAngle < startAngleRad) {
-      normalizedAngle += 2 * math.pi;
-    }
-
-    // Calculate percentage based on angle (0 to 1)
-    double percentage =
-        (normalizedAngle - startAngleRad) /
-        (endAngleRad - startAngleRad + 2 * math.pi);
-
-    // Map percentage to our range (40-60)
+    // Map percentage to our range
     double value = _minHumidity + (percentage * (_maxHumidity - _minHumidity));
 
     // Round to nearest 0.5 increment
@@ -123,14 +87,17 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
   }
 
   Future<void> _setHumidity() async {
-    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
+    );
 
     if (_isSettingValue) {
       print("⏳ Already setting humidity, please wait");
       return;
     }
 
-    if (!esp32Provider.isConnected) {
+    if (!otPanelProvider.secondEspOnline) {
       Get.snackbar(
         "Error",
         "ESP32 not connected",
@@ -160,20 +127,35 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
       _isSettingValue = true;
     });
 
+    // Capture the value before any await — provider/UI state can change
+    // out from under us while the request is in flight.
+    final double humidityToSet = _pendingHumidity;
+
     try {
-      print("🎯 Setting humidity to: ${_pendingHumidity.toStringAsFixed(1)}%");
+      print("🎯 Setting humidity to: ${humidityToSet.toStringAsFixed(1)}%");
 
       _lastSetTime = DateTime.now();
 
-      // Send humidity setpoint to ESP32
-      String humiditySetpoint = _convertToSetpointFormat(_pendingHumidity);
+      final ok = await otPanelProvider.setHumiditySetpoint(humidityToSet);
 
-      // Use the provider's sendControl method
-      await esp32Provider.sendControl("S_RH_SETPT", humiditySetpoint);
+      if (!mounted) return;
+
+      if (!ok) {
+        Get.snackbar(
+          "Set Failed",
+          "ESP32 did not accept the new humidity setpoint",
+          snackPosition: SnackPosition.TOP,
+          colorText: Colors.white,
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
+        );
+        return;
+      }
 
       Get.snackbar(
         "Success",
-        "Humidity set to ${_pendingHumidity.toStringAsFixed(1)}%",
+        "Humidity set to ${humidityToSet.toStringAsFixed(1)}%",
         snackPosition: SnackPosition.TOP,
         colorText: Colors.white,
         backgroundColor: Colors.green,
@@ -188,15 +170,17 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
       }
     } catch (e) {
       print("❌ Error setting humidity: $e");
-      Get.snackbar(
-        "Set Failed",
-        "Failed to set humidity: ${e.toString().split('\n').first}",
-        snackPosition: SnackPosition.TOP,
-        colorText: Colors.white,
-        backgroundColor: Colors.red,
-        duration: const Duration(seconds: 3),
-        icon: const Icon(Icons.error, color: Colors.white),
-      );
+      if (mounted) {
+        Get.snackbar(
+          "Set Failed",
+          "Failed to set humidity: ${e.toString().split('\n').first}",
+          snackPosition: SnackPosition.TOP,
+          colorText: Colors.white,
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -207,19 +191,19 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
     }
   }
 
-  // Get current humidity value from ESP32
+  // Get current humidity value from the provider
   String _getCurrentHumidityValue() {
-    final esp32Provider = Provider.of<ESP32Provider>(context);
-    return "${esp32Provider.currentHumidity}%";
+    final otPanelProvider = Provider.of<OTPanelProvider>(context);
+    return "${otPanelProvider.humidity.toStringAsFixed(1)}%";
   }
 
-  Color _getButtonColor(ESP32Provider esp32Provider) {
-    if (!esp32Provider.isConnected) return Colors.grey;
+  Color _getButtonColor(OTPanelProvider otPanelProvider) {
+    if (!otPanelProvider.secondEspOnline) return Colors.grey;
     if (_isSettingValue) return Colors.blue;
     return Colors.black;
   }
 
-  Widget _buildButtonContent(ESP32Provider esp32Provider) {
+  Widget _buildButtonContent(OTPanelProvider otPanelProvider) {
     if (_isSettingValue) {
       return Row(
         mainAxisSize: MainAxisSize.min,
@@ -242,23 +226,23 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
     }
 
     return Text(
-      esp32Provider.isConnected ? "SET HUMIDITY" : "ESP32 DISCONNECTED",
+      otPanelProvider.secondEspOnline ? "SET HUMIDITY" : "ESP32 DISCONNECTED",
       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
     );
   }
 
   Widget _buildConnectionStatus() {
-    final esp32Provider = Provider.of<ESP32Provider>(context);
+    final otPanelProvider = Provider.of<OTPanelProvider>(context);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
       decoration: BoxDecoration(
-        color: esp32Provider.isConnected
+        color: otPanelProvider.secondEspOnline
             ? Colors.green.withOpacity(0.2)
             : Colors.red.withOpacity(0.2),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: esp32Provider.isConnected ? Colors.green : Colors.red,
+          color: otPanelProvider.secondEspOnline ? Colors.green : Colors.red,
           width: 1,
         ),
       ),
@@ -267,11 +251,11 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
         children: [
           // const SizedBox(width: 6),
           Text(
-            esp32Provider.isConnected ? "" : "",
+            otPanelProvider.secondEspOnline ? "" : "",
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.bold,
-              color: esp32Provider.isConnected ? Colors.green : Colors.red,
+              color: otPanelProvider.secondEspOnline ? Colors.green : Colors.red,
             ),
           ),
         ],
@@ -321,14 +305,12 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
                                   ),
                                 ],
                               ),
-                              child: Consumer<ESP32Provider>(
-                                builder: (context, esp32Provider, child) {
+                              child: Consumer<OTPanelProvider>(
+                                builder: (context, otPanelProvider, child) {
                                   // Only update pending humidity from ESP32 if user is not dragging
                                   if (!_isDragging && !_isSettingValue) {
                                     double currentSetpoint =
-                                        _convertFromSetpointFormat(
-                                          esp32Provider.humiditySetpoint,
-                                        );
+                                        otPanelProvider.humiditySetpoint;
 
                                     // If the setpoint from ESP32 is different from our pending humidity
                                     if ((currentSetpoint - _pendingHumidity)
@@ -465,41 +447,46 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
                                           ),
                                           child: LayoutBuilder(
                                             builder: (context, constraints) {
+                                              final size = constraints.biggest;
+                                              // Only touches on the bar count; a drag
+                                              // must start on the bar but may then
+                                              // wander off it.
                                               return GestureDetector(
                                                 onPanStart: (details) {
-                                                  setState(() {
-                                                    _isDragging = true;
-                                                  });
+                                                  _gaugeGrabbed =
+                                                      GaugeArcHit.isOnArc(
+                                                        details.localPosition,
+                                                        size,
+                                                      );
+                                                  if (_gaugeGrabbed) {
+                                                    _handleGaugeInteraction(
+                                                      details.localPosition,
+                                                      size,
+                                                    );
+                                                  }
                                                 },
                                                 onPanUpdate: (details) {
-                                                  final box =
-                                                      context.findRenderObject()
-                                                          as RenderBox;
-                                                  final localPosition = box
-                                                      .globalToLocal(
-                                                        details.globalPosition,
-                                                      );
-                                                  _handleGaugeInteraction(
-                                                    localPosition,
-                                                    constraints.biggest,
-                                                  );
+                                                  if (_gaugeGrabbed) {
+                                                    _handleGaugeInteraction(
+                                                      details.localPosition,
+                                                      size,
+                                                    );
+                                                  }
                                                 },
-                                                onPanEnd: (details) {
-                                                  // Keep dragging state true until user presses SET
-                                                  // or set to false if you want it to reset
-                                                },
+                                                // _isDragging stays true until the user
+                                                // presses SET
+                                                onPanEnd: (_) => _gaugeGrabbed = false,
+                                                onPanCancel: () => _gaugeGrabbed = false,
                                                 onTapDown: (details) {
-                                                  final box =
-                                                      context.findRenderObject()
-                                                          as RenderBox;
-                                                  final localPosition = box
-                                                      .globalToLocal(
-                                                        details.globalPosition,
-                                                      );
-                                                  _handleGaugeInteraction(
-                                                    localPosition,
-                                                    constraints.biggest,
-                                                  );
+                                                  if (GaugeArcHit.isOnArc(
+                                                    details.localPosition,
+                                                    size,
+                                                  )) {
+                                                    _handleGaugeInteraction(
+                                                      details.localPosition,
+                                                      size,
+                                                    );
+                                                  }
                                                 },
                                                 child: SfRadialGauge(
                                                   axes: [
@@ -605,13 +592,13 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
                                           ),
                                           child: ElevatedButton(
                                             onPressed:
-                                                esp32Provider.isConnected &&
+                                                otPanelProvider.secondEspOnline &&
                                                     !_isSettingValue
                                                 ? _setHumidity
                                                 : null,
                                             style: ElevatedButton.styleFrom(
                                               backgroundColor: _getButtonColor(
-                                                esp32Provider,
+                                                otPanelProvider,
                                               ),
                                               foregroundColor: Colors.white,
                                               padding:
@@ -626,7 +613,7 @@ class _HumidityGaugeScreenState extends State<HumidityGaugeScreen> {
                                               elevation: 4,
                                             ),
                                             child: _buildButtonContent(
-                                              esp32Provider,
+                                              otPanelProvider,
                                             ),
                                           ),
                                         ),

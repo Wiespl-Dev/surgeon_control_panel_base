@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:wiespl_surgeon_panel/services/esptwo.dart'; // Make sure this import path is correct
+import 'package:wiespl_surgeon_panel/services/nnn.dart'; // OTPanelProvider
 
 class LightIntensityPage extends StatefulWidget {
   @override
@@ -22,8 +22,14 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
   }
 
   void _initializeData() {
-    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-    esp32Provider.startPolling();
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
+    );
+    // OTPanelProvider has no separate startPolling(): initialize() does an
+    // immediate fetch and (re)starts its internal poll timer, which is the
+    // same effect the old esp32Provider.startPolling() call had here.
+    otPanelProvider.initialize();
   }
 
   // Button cooldown management
@@ -47,8 +53,11 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
   @override
   void dispose() {
     _cooldownTimer?.cancel();
-    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-    esp32Provider.stopPolling();
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
+    );
+    otPanelProvider.stopPolling();
     super.dispose();
   }
 
@@ -167,7 +176,10 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
     );
   }
 
-  // Toggle all lights - UPDATED to use new toggleAllLights method
+  // Toggle all lights — this page only shows lights 1-4, so it must NOT
+  // use OTPanelProvider.setAllLights (that flips all 8 on the panel,
+  // including the 4 this screen doesn't show). setLights sends 1-4 in a
+  // single write so they switch together.
   void _toggleAllLights(bool newState) async {
     if (!_canPressButton) {
       _showErrorSnackbar("Please wait before pressing another button");
@@ -176,17 +188,29 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
 
     _startCooldown();
 
-    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-
-    // Use the new method that sends all 4 lights in one request
-    await esp32Provider.toggleAllLights(newState);
-
-    _showSuccessSnackbar(
-      newState ? "All lights turned ON" : "All lights turned OFF",
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
     );
+
+    final ok = await otPanelProvider.setLights({
+      for (var id = 1; id <= 4; id++) id: newState,
+    });
+
+    if (ok) {
+      _showSuccessSnackbar(
+        newState ? "All lights turned ON" : "All lights turned OFF",
+      );
+    } else {
+      _showErrorSnackbar(
+        "Failed to ${newState ? 'turn on' : 'turn off'} some lights",
+      );
+    }
   }
 
-  // Toggle individual light - UPDATED to use new toggleLight method
+  // Toggle individual light — now goes through OTPanelProvider.setLight,
+  // which is optimistic (updates lightStates immediately, rolls back on
+  // failure) and returns whether the write actually succeeded.
   void _toggleLight(int index, bool newState) async {
     if (!_canPressButton) {
       _showErrorSnackbar("Please wait before pressing another button");
@@ -195,43 +219,41 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
 
     _startCooldown();
 
-    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
+    );
 
-    // Use the new toggleLight method (light numbers are 1-based)
-    await esp32Provider.toggleLight(index + 1, newState);
+    // Relay/light numbers are 1-based in OTPanelProvider.
+    final ok = await otPanelProvider.setLight(index + 1, newState);
 
-    _showSuccessSnackbar("Light ${index + 1} ${newState ? 'ON' : 'OFF'}");
-  }
-
-  // Get current state for All Lights toggle - UPDATED
-  bool _getAllLightsState() {
-    final esp32Provider = Provider.of<ESP32Provider>(context);
-    // Check if ANY of the 4 lights is on
-    return esp32Provider.light1 ||
-        esp32Provider.light2 ||
-        esp32Provider.light3 ||
-        esp32Provider.light4;
-  }
-
-  // Get individual light state - UPDATED to use new getters
-  bool _getLightState(int index) {
-    final esp32Provider = Provider.of<ESP32Provider>(context);
-
-    switch (index) {
-      case 0:
-        return esp32Provider.light1;
-      case 1:
-        return esp32Provider.light2;
-      case 2:
-        return esp32Provider.light3;
-      case 3:
-        return esp32Provider.light4;
-      default:
-        return false;
+    if (ok) {
+      _showSuccessSnackbar("Light ${index + 1} ${newState ? 'ON' : 'OFF'}");
+    } else {
+      _showErrorSnackbar("Failed to set Light ${index + 1}");
     }
   }
 
-  // Manual refresh
+  // Get current state for All Lights toggle — checks the first 4 relays
+  // (this page only exposes 4 of OTPanelProvider's 8 lights).
+  bool _getAllLightsState() {
+    final otPanelProvider = Provider.of<OTPanelProvider>(context);
+    return otPanelProvider.lightStates[0] ||
+        otPanelProvider.lightStates[1] ||
+        otPanelProvider.lightStates[2] ||
+        otPanelProvider.lightStates[3];
+  }
+
+  // Get individual light state
+  bool _getLightState(int index) {
+    final otPanelProvider = Provider.of<OTPanelProvider>(context);
+    if (index < 0 || index >= otPanelProvider.lightStates.length) return false;
+    return otPanelProvider.lightStates[index];
+  }
+
+  // Manual refresh — OTPanelProvider doesn't expose a standalone
+  // refresh/fetch method, so this re-runs initialize(), which does an
+  // immediate fetch and restarts its poll timer.
   void _manualRefresh() {
     if (!_canPressButton) {
       _showErrorSnackbar("Please wait before pressing another button");
@@ -240,14 +262,17 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
 
     _startCooldown();
 
-    final esp32Provider = Provider.of<ESP32Provider>(context, listen: false);
-    esp32Provider.refreshData();
+    final otPanelProvider = Provider.of<OTPanelProvider>(
+      context,
+      listen: false,
+    );
+    otPanelProvider.initialize();
     _showSuccessSnackbar("Refreshing data...");
   }
 
   @override
   Widget build(BuildContext context) {
-    final esp32Provider = Provider.of<ESP32Provider>(context);
+    final otPanelProvider = Provider.of<OTPanelProvider>(context);
 
     return Material(
       color: const Color.fromARGB(255, 35, 87, 136),
@@ -309,7 +334,7 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
                                 // vertical: 9,
                               ),
                               decoration: BoxDecoration(
-                                color: esp32Provider.isConnected
+                                color: otPanelProvider.isConnected
                                     ? Colors.green
                                     : Colors.red,
                                 borderRadius: BorderRadius.circular(8),
@@ -318,8 +343,8 @@ class _LightIntensityPageState extends State<LightIntensityPage> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   // Text(
-                                  //   esp32Provider.isConnected
-                                  //       ? "ESP32"
+                                  //   otPanelProvider.isConnected
+                                  //       ? "CONNECTED"
                                   //       : "OFFLINE",
                                   //   style: const TextStyle(
                                   //     color: Colors.white,

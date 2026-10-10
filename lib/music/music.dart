@@ -2,6 +2,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:io';
 
 import 'package:wiespl_surgeon_panel/music/mupro.dart';
 
@@ -28,6 +31,12 @@ class Music {
 
 class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   final List<Music> _assetMusicList = [];
+  final List<Music> _deviceMusicList = [];
+
+  // Combined list: assets first, then device
+  List<Music> get _allMusic => [..._assetMusicList, ..._deviceMusicList];
+
+  bool _isLoadingFiles = false;
 
   @override
   void initState() {
@@ -97,25 +106,124 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     ]);
   }
 
+  // ─── Device file picker ───────────────────────────────────────────────────
+
+  Future<void> _pickMusicFromDevice() async {
+    // Request storage permission
+    bool granted = await _requestStoragePermission();
+    if (!granted) {
+      _showError('Storage permission denied');
+      return;
+    }
+
+    setState(() => _isLoadingFiles = true);
+
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.audio,
+        allowMultiple: true,
+        allowCompression: false,
+      );
+
+      if (result != null && result.files.isNotEmpty) {
+        setState(() {
+          int nextId = _deviceMusicList.isEmpty
+              ? 1
+              : _deviceMusicList
+                        .map((m) => m.id)
+                        .reduce((a, b) => a > b ? a : b) +
+                    1;
+
+          for (final file in result.files) {
+            if (file.path != null) {
+              // Avoid duplicates
+              final alreadyAdded = _deviceMusicList.any(
+                (m) => m.fileUrl == file.path,
+              );
+              if (!alreadyAdded) {
+                _deviceMusicList.add(
+                  Music(
+                    id: nextId++,
+                    name: _cleanFileName(file.name),
+                    fileUrl: file.path!,
+                    isAsset: false,
+                  ),
+                );
+              }
+            }
+          }
+        });
+      }
+    } catch (e) {
+      _showError('Failed to pick files: $e');
+    } finally {
+      setState(() => _isLoadingFiles = false);
+    }
+  }
+
+  Future<bool> _requestStoragePermission() async {
+    if (Platform.isAndroid) {
+      // Android 13+
+      if (await Permission.audio.isGranted) return true;
+      final audioStatus = await Permission.audio.request();
+      if (audioStatus.isGranted) return true;
+
+      // Android 12 and below
+      if (await Permission.storage.isGranted) return true;
+      final storageStatus = await Permission.storage.request();
+      return storageStatus.isGranted;
+    }
+    return true; // iOS handles via file picker natively
+  }
+
+  String _cleanFileName(String fileName) {
+    // Remove extension
+    String name = fileName.replaceAll(
+      RegExp(r'\.(mp3|wav|flac|aac|ogg|m4a)$', caseSensitive: false),
+      '',
+    );
+    // Replace underscores/hyphens with spaces
+    name = name.replaceAll(RegExp(r'[_\-]+'), ' ').trim();
+    return name;
+  }
+
+  void _removeDeviceTrack(int index, MusicPlayerProvider playerProvider) {
+    // index here is relative to _allMusic; device tracks start after assets
+    final assetCount = _assetMusicList.length;
+    final deviceIndex = index - assetCount;
+    if (deviceIndex < 0) return;
+
+    // Stop if currently playing this track
+    if (playerProvider.currentIndex == index) {
+      playerProvider.stop();
+    }
+
+    setState(() {
+      _deviceMusicList.removeAt(deviceIndex);
+    });
+  }
+
+  // ─── Playback ─────────────────────────────────────────────────────────────
+
   Future<void> _playMusic(int index, MusicPlayerProvider playerProvider) async {
     try {
-      final music = _assetMusicList[index];
+      final music = _allMusic[index];
 
-      if (playerProvider.currentIndex == index &&
-          playerProvider.isPlaying &&
-          _getCurrentMusic(playerProvider)?.id == music.id) {
-        // Pause if same song is playing
+      final isSameSong =
+          playerProvider.currentIndex == index &&
+          _getCurrentMusic(playerProvider)?.id == music.id;
+
+      if (isSameSong && playerProvider.isPlaying) {
         await playerProvider.player.pause();
-      } else if (playerProvider.currentIndex == index &&
-          !playerProvider.isPlaying &&
-          _getCurrentMusic(playerProvider)?.id == music.id) {
-        // Resume if same song is paused
+      } else if (isSameSong && !playerProvider.isPlaying) {
         await playerProvider.player.play();
       } else {
-        // Play new song
-        await playerProvider.player.setAsset(music.fileUrl);
+        if (music.isAsset) {
+          await playerProvider.player.setAsset(music.fileUrl);
+        } else {
+          await playerProvider.player.setFilePath(music.fileUrl);
+        }
 
-        // Set up completion listener for looping
         playerProvider.player.playerStateStream.listen((state) {
           if (state.processingState == ProcessingState.completed) {
             if (playerProvider.isLooping &&
@@ -130,16 +238,17 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
       }
     } catch (e) {
       _showError('Playback error: $e');
-      print('Error playing music: $e');
+      debugPrint('Error playing music: $e');
     }
   }
 
   Music? _getCurrentMusic(MusicPlayerProvider playerProvider) {
     if (playerProvider.currentIndex == null) return null;
-    return playerProvider.currentIndex! < _assetMusicList.length
-        ? _assetMusicList[playerProvider.currentIndex!]
-        : null;
+    final idx = playerProvider.currentIndex!;
+    return idx < _allMusic.length ? _allMusic[idx] : null;
   }
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
 
   String _formatDuration(Duration duration) {
     String twoDigits(int n) => n.toString().padLeft(2, '0');
@@ -149,6 +258,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   }
 
   void _showError(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -158,11 +268,14 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     );
   }
 
+  // ─── UI ───────────────────────────────────────────────────────────────────
+
   Widget _buildSongTile(int index, MusicPlayerProvider playerProvider) {
-    final music = _assetMusicList[index];
+    final music = _allMusic[index];
     final isCurrentPlaying =
         playerProvider.currentIndex == index &&
         _getCurrentMusic(playerProvider)?.id == music.id;
+    final isDevice = !music.isAsset;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -189,9 +302,19 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Default Music',
-              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            Row(
+              children: [
+                Icon(
+                  isDevice ? Icons.folder : Icons.library_music,
+                  size: 12,
+                  color: Colors.grey[500],
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  isDevice ? 'Device' : 'Default Music',
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+              ],
             ),
             if (isCurrentPlaying && playerProvider.isPlaying)
               LinearProgressIndicator(
@@ -200,7 +323,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                           playerProvider.duration.inSeconds
                     : 0,
                 backgroundColor: Colors.grey[300],
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.teal),
+                valueColor: const AlwaysStoppedAnimation<Color>(Colors.teal),
               ),
           ],
         ),
@@ -213,7 +336,12 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                 color: playerProvider.isLooping ? Colors.orange : Colors.grey,
                 size: 20,
               ),
-            const SizedBox(width: 8),
+            if (isDevice)
+              IconButton(
+                icon: const Icon(Icons.close, size: 18, color: Colors.red),
+                tooltip: 'Remove',
+                onPressed: () => _removeDeviceTrack(index, playerProvider),
+              ),
           ],
         ),
         onTap: () => _playMusic(index, playerProvider),
@@ -221,27 +349,78 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     );
   }
 
-  Widget _buildMusicList(MusicPlayerProvider playerProvider) {
-    if (_assetMusicList.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.music_note, size: 64, color: Colors.white70),
-            const SizedBox(height: 16),
-            Text(
-              'No music available',
-              style: const TextStyle(fontSize: 18, color: Colors.white),
-              textAlign: TextAlign.center,
+  Widget _buildSectionHeader(String title, {Widget? trailing}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 16, 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.2,
             ),
-          ],
-        ),
-      );
-    }
+          ),
+          if (trailing != null) trailing,
+        ],
+      ),
+    );
+  }
 
-    return ListView.builder(
-      itemCount: _assetMusicList.length,
-      itemBuilder: (context, index) => _buildSongTile(index, playerProvider),
+  Widget _buildMusicList(MusicPlayerProvider playerProvider) {
+    return ListView(
+      children: [
+        // ── Default (asset) songs ──
+        _buildSectionHeader('DEFAULT TRACKS'),
+        ...List.generate(
+          _assetMusicList.length,
+          (i) => _buildSongTile(i, playerProvider),
+        ),
+
+        // ── Device songs ──
+        _buildSectionHeader(
+          'DEVICE TRACKS${_deviceMusicList.isNotEmpty ? ' (${_deviceMusicList.length})' : ''}',
+          trailing: _isLoadingFiles
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white70,
+                  ),
+                )
+              : TextButton.icon(
+                  onPressed: _pickMusicFromDevice,
+                  icon: const Icon(Icons.add, color: Colors.white70, size: 18),
+                  label: const Text(
+                    'Add',
+                    style: TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                ),
+        ),
+        if (_deviceMusicList.isEmpty && !_isLoadingFiles)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            child: Row(
+              children: [
+                Icon(Icons.folder_open, color: Colors.white38, size: 20),
+                const SizedBox(width: 8),
+                const Text(
+                  'Tap Add to browse device music',
+                  style: TextStyle(color: Colors.white38, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ...List.generate(
+          _deviceMusicList.length,
+          (i) => _buildSongTile(_assetMusicList.length + i, playerProvider),
+        ),
+        const SizedBox(height: 16),
+      ],
     );
   }
 
@@ -293,8 +472,8 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  const Color.fromARGB(255, 35, 87, 136),
-                  const Color.fromARGB(255, 35, 87, 136),
+                  Color.fromARGB(255, 35, 87, 136),
+                  Color.fromARGB(255, 35, 87, 136),
                 ],
               ),
             ),
@@ -310,7 +489,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                       children: [
                         Row(
                           children: [
-                            Icon(Icons.music_note, color: Colors.white),
+                            const Icon(Icons.music_note, color: Colors.white),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
@@ -322,6 +501,15 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
+                            if (!currentMusic.isAsset)
+                              const Padding(
+                                padding: EdgeInsets.only(right: 4),
+                                child: Icon(
+                                  Icons.folder,
+                                  color: Colors.white70,
+                                  size: 14,
+                                ),
+                              ),
                             if (playerProvider.isLooping)
                               const Icon(
                                 Icons.loop,
@@ -362,7 +550,6 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                       ],
                     ),
                   ),
-                // Music List
                 Expanded(child: _buildMusicList(playerProvider)),
               ],
             ),
@@ -400,7 +587,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                               overflow: TextOverflow.ellipsis,
                             ),
                             Text(
-                              'Default Music',
+                              currentMusic.isAsset ? 'Default Music' : 'Device',
                               style: TextStyle(
                                 fontSize: 12,
                                 color: Colors.grey[600],
