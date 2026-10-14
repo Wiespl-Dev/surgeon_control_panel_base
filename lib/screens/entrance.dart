@@ -18,7 +18,7 @@ class ORStatusMonitor extends StatefulWidget {
 class _ORStatusMonitorState extends State<ORStatusMonitor>
     with TickerProviderStateMixin {
   // Default IP (will be overridden by SharedPreferences if available)
-  String _pressureRelayIP = '192.168.0.103:80'; // OTPanelProvider - uses "vocIp" key
+  String _pressureRelayIP = '192.168.4.1:80'; // OTPanelProvider - uses "vocIp" key
   
   // UI animations
   late AnimationController _cardController;
@@ -51,11 +51,11 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
   Timer? _fumigationPollTimer;
   bool _isShowingRequestDialog = false;
 
-  // System power relay — same as the home screen's System On/Off
-  // (relay 10 is wired as the master on/off; relay 8 is night mode).
-  static const int _systemPowerRelay = 10;
-  static const int _defumigationRelay = 9;
-  static const int _nightModeRelay = 8;
+  // Waveshare relay wiring: 6 = night mode, 7 = defumigation,
+  // 8 = system on/off (same relay as the home screen's System On/Off).
+  static const int _nightModeRelay = 6;
+  static const int _defumigationRelay = 7;
+  static const int _systemPowerRelay = 8;
 
   // Guards against double-taps while a system on/off write is in flight.
   bool _isSystemPowerBusy = false;
@@ -242,7 +242,7 @@ class _ORStatusMonitorState extends State<ORStatusMonitor>
     }
   }
 
-  // Defumigation (relay 9) and night mode (relay 10) are plain relays,
+  // Defumigation (relay 7) and night mode (relay 6) are plain relays,
   // switched the same way as System On/Off.
   Future<void> _handleRelayToggle(
     int relay,

@@ -21,7 +21,7 @@
 // class OTPanelProvider extends ChangeNotifier {
 //   // Changed to use "vocIp" key as per the login screen
 //   static const String _ipPrefKey = 'vocIp';
-//   static const String _defaultIp = '192.168.0.103';
+//   static const String _defaultIp = '192.168.4.1'; // Waveshare WiFi AP gateway
 //   static const int _port = 80; // firmware's WebServer runs on :80, not :8080
 //   static const Duration _pollInterval = Duration(seconds: 3);
 //   static const Duration _requestTimeout = Duration(seconds: 4);
@@ -264,10 +264,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Talks to two devices:
 ///
-/// 1. The Waveshare ESP32-S3 controller ("waveshareWithslave" firmware) at
-///    "vocIp":80 — relays, pressure, gas, night mode, fumigation:
-///    - GET  /api/lights, /api/pressure, /api/gas
-///    - GET  /api/status — `local.night_mode`, and `second_esp` (temp/RH +
+/// 1. The Waveshare ESP32-S3 controller (Waveshare_ESP32S3_Master v7.2 firmware) at
+///    "vocIp":80 (default 192.168.4.1, its WiFi AP gateway — the firmware
+///    serves Android only there) — relays, pressure, gas, night mode,
+///    fumigation:
+///    - GET  /api/status and /api/pressure each poll; /api/lights only
+///      after a night-mode change
+///    - /api/status — `local` (night_mode, relay_state, gas_state bitmasks)
+///      and `second_esp` (temp/RH +
 ///      setpoints pushed to it by a slave ESP32, real units)
 ///    - POST /api/light, /api/lights/all, /api/night
 ///    - POST /api/temperature/setpoint, /api/humidity/setpoint {"value": v}
@@ -288,7 +292,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class OTPanelProvider extends ChangeNotifier {
   // Waveshare controller — uses "vocIp" key from SharedPreferences
   static const String _ipPrefKey = 'vocIp';
-  static const String _defaultIp = '192.168.0.103';
+  static const String _defaultIp = '192.168.4.1'; // Waveshare WiFi AP gateway
   static const int _port = 80;
 
   // Temperature/humidity ESP32 — uses "espIp" key from SharedPreferences
@@ -307,6 +311,9 @@ class OTPanelProvider extends ChangeNotifier {
   static const int _offlineAfterFailures = 3;
   int _waveshareFailures = 0;
   int _tempEspFailures = 0;
+  int _wsSecondEspOfflinePolls = 0;
+  // Poll cycles between retries of an offline "espIp":8080 board (~30 s).
+  static const int _offlineRetryEvery = 10;
 
   // After a /control write the ESP32 relays it over RS485, and the AHU's
   // next packet can still echo the old setpoint. Hold the locally written
@@ -399,7 +406,7 @@ class OTPanelProvider extends ChangeNotifier {
   }
 
   /// Normalize down to a bare host — avoids building
-  /// "192.168.0.103:80:80" if the saved pref already has a scheme or port.
+  /// "192.168.4.1:80:80" if the saved pref already has a scheme or port.
   String _stripPort(String raw) {
     var host = raw.trim();
     host = host.replaceFirst(RegExp(r'^https?://'), '');
@@ -449,16 +456,27 @@ class OTPanelProvider extends ChangeNotifier {
       }
     }
 
-    // Temp/RH fallback: use the Waveshare's relayed slave data only when the
-    // espwifipp board isn't reachable directly. If this cycle's Waveshare
-    // poll was missed (but it isn't offline yet), keep the previous choice.
+    // Temp/RH: the Waveshare is the gateway for the temp/RH ESP32 (v7.2
+    // firmware), so its `second_esp` data wins whenever that node is
+    // registered — the same data the Waveshare web page shows. The direct
+    // espwifipp board is only a fallback. If this cycle's Waveshare poll was
+    // missed (but it isn't offline yet), keep the previous choice.
     final viaWs = _lastWaveshareSecondEsp;
     _lastWaveshareSecondEsp = null;
-    if (_tempEspDirectOnline || !waveshareOnline) {
+    if (!waveshareOnline) {
       _tempViaWaveshare = false;
     } else if (viaWs != null) {
-      _tempViaWaveshare = viaWs['online'] == true;
-      if (_tempViaWaveshare) _applyWaveshareSecondEsp(viaWs);
+      final registered = (viaWs['device_id'] ?? '').toString().isNotEmpty;
+      if (registered) {
+        _applyWaveshareSecondEsp(viaWs);
+        // The firmware flags the node offline after 6 s without a push, so
+        // `online` can flicker; only drop it after several offline reports.
+        _wsSecondEspOfflinePolls =
+            viaWs['online'] == true ? 0 : _wsSecondEspOfflinePolls + 1;
+        _tempViaWaveshare = _wsSecondEspOfflinePolls < _offlineAfterFailures;
+      } else {
+        _tempViaWaveshare = false;
+      }
     }
 
     secondEspOnline = _tempEspDirectOnline || _tempViaWaveshare;
@@ -467,13 +485,13 @@ class OTPanelProvider extends ChangeNotifier {
   }
 
   Future<void> _pollController() async {
-    // All endpoints live on the same board: if /api/lights is unreachable,
-    // skip the rest instead of waiting out three more timeouts.
-    final reachable = await _get(_uri('/api/lights'), _applyLights);
+    // The Waveshare's web server answers one request at a time, so keep the
+    // poll small: /api/status carries relays, gas, night mode and the temp/RH
+    // node in one reply. Pressure needs /api/pressure — the firmware only
+    // takes a fresh reading there.
+    final reachable = await _get(_uri('/api/status'), _applyStatus);
     if (reachable) {
       await _get(_uri('/api/pressure'), _applyPressure);
-      await _get(_uri('/api/gas'), _applyGas);
-      await _get(_uri('/api/status'), _applyStatus);
     }
 
     _waveshareFailures = reachable ? 0 : _waveshareFailures + 1;
@@ -488,6 +506,13 @@ class OTPanelProvider extends ChangeNotifier {
   }
 
   Future<void> _pollTempEsp() async {
+    // With the v7.2 Waveshare there is usually no board at "espIp":8080.
+    // While it's offline, only retry every few cycles instead of every poll.
+    if (!_tempEspDirectOnline &&
+        _tempEspFailures >= _offlineAfterFailures &&
+        _tempEspFailures++ % _offlineRetryEvery != 0) {
+      return;
+    }
     // /all-parameters is /sensor-data plus light_status[] and
     // sensor_faults[], which are needed when there is no Waveshare.
     final reachable = await _get(_tempUri('/all-parameters'), _applySensorData);
@@ -528,17 +553,6 @@ class OTPanelProvider extends ChangeNotifier {
     }
   }
 
-  void _applyGas(Map<String, dynamic> data) {
-    final zones = data['gas'];
-    if (zones is! List) return;
-    for (final z in zones) {
-      if (z is! Map) continue;
-      final id = (z['id'] as num?)?.toInt();
-      if (id == null || id < 1 || id > 8) continue;
-      gasZoneFull[id - 1] = z['full'] == true;
-    }
-  }
-
   void _applyPressure(Map<String, dynamic> data) {
     // Negative readings are shown as 0. Use <= so -0.0 / tiny negatives
     // don't render as "-0.00".
@@ -547,14 +561,27 @@ class OTPanelProvider extends ChangeNotifier {
     pressureRangePa = _toDouble(data['range_pa']);
   }
 
-  /// /api/status → {local: {night_mode, ...}, second_esp: {online,
-  /// temperature, humidity, temperature_setpoint, humidity_setpoint, ...}}.
-  /// `second_esp` is only used when the espwifipp board isn't reachable
-  /// directly (decided in _fetchStatus).
+  /// /api/status → {local: {night_mode, relay_state, gas_state, ...},
+  /// second_esp: {online, device_id, temperature, humidity,
+  /// temperature_setpoint, humidity_setpoint, ...}}.
+  /// relay_state / gas_state are bitmasks: bit 0 = relay / zone 1.
+  /// `second_esp` is applied in _fetchStatus.
   void _applyStatus(Map<String, dynamic> data) {
     final local = data['local'];
     if (local is Map) {
       nightModeActive = local['night_mode'] == true;
+      final relays = local['relay_state'];
+      if (relays is num && _pendingLightWrites == 0) {
+        for (var i = 0; i < _waveshareRelayCount; i++) {
+          lightStates[i] = (relays.toInt() >> i) & 1 == 1;
+        }
+      }
+      final gas = local['gas_state'];
+      if (gas is num) {
+        for (var i = 0; i < gasZoneFull.length; i++) {
+          gasZoneFull[i] = (gas.toInt() >> i) & 1 == 1;
+        }
+      }
     }
     final second = data['second_esp'];
     if (second is Map) {
@@ -590,6 +617,9 @@ class OTPanelProvider extends ChangeNotifier {
     // Lights/MGPS are applied in _fetchStatus once both polls are done and
     // we know whether a Waveshare answered.
     _lastEspIo = data;
+
+    // The Waveshare's second_esp data takes priority (see _fetchStatus).
+    if (_tempViaWaveshare) return;
 
     temperature = _toDouble(data['temperature']);
     humidity = _toDouble(data['humidity']);
@@ -813,7 +843,7 @@ class OTPanelProvider extends ChangeNotifier {
     _tempSetpointGuardUntil = DateTime.now().add(_setpointGuard);
     notifyListeners();
 
-    final ok = _tempEspDirectOnline
+    final ok = _tempEspDirectOnline && !_tempViaWaveshare
         ? await _postSetpoint('S_TEMP_SETPT', value)
         : await _postWaveshareSetpoint('/api/temperature/setpoint', value);
     if (!ok) {
@@ -832,7 +862,7 @@ class OTPanelProvider extends ChangeNotifier {
     _humSetpointGuardUntil = DateTime.now().add(_setpointGuard);
     notifyListeners();
 
-    final ok = _tempEspDirectOnline
+    final ok = _tempEspDirectOnline && !_tempViaWaveshare
         ? await _postSetpoint('S_RH_SETPT', value)
         : await _postWaveshareSetpoint('/api/humidity/setpoint', value);
     if (!ok) {

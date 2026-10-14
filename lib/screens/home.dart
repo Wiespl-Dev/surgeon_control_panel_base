@@ -30,9 +30,9 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
   String? _currentMode;
   bool _isEspInitialized = false;
 
-  // System power relay — relay 10 is wired as the master system on/off,
+  // System power relay — Waveshare relay 8 is the master system on/off,
   // separate from lights 1-4 shown on the Light screen.
-  static const int _systemPowerRelay = 10;
+  static const int _systemPowerRelay = 8;
 
   // Guards against double-taps while a system on/off write is in flight.
   bool _isSystemPowerBusy = false;
@@ -226,10 +226,10 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
 
     switch (originalIndex + 1) {
       case 1:
-        // Get.to(() => TempGaugeScreen(), transition: Transition.rightToLeft);
+        Get.to(() => TempGaugeScreen(), transition: Transition.rightToLeft);
         break;
       case 2:
-        // Get.to(() => HumidityGaugeScreen(), transition: Transition.rightToLeft);
+        Get.to(() => HumidityGaugeScreen(), transition: Transition.rightToLeft);
         break;
       case 3:
         Get.to(() => LightIntensityPage(), transition: Transition.rightToLeft);
@@ -1027,40 +1027,40 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
                 const SizedBox(width: 20),
                 Column(
                   children: [
-                    // Text(
-                    //   "system_status".tr,
-                    //   style: const TextStyle(
-                    //     color: Colors.white,
-                    //     fontSize: 12,
-                    //     fontWeight: FontWeight.bold,
-                    //   ),
-                    // ),
-                    // Container(
-                    //   alignment: Alignment.center,
-                    //   height: 40,
-                    //   child: Transform.scale(
-                    //     scale: 1.5,
-                    //     child: _isSystemPowerBusy
-                    //         ? const SizedBox(
-                    //             width: 24,
-                    //             height: 24,
-                    //             child: CircularProgressIndicator(
-                    //               strokeWidth: 2,
-                    //               valueColor: AlwaysStoppedAnimation<Color>(
-                    //                 Colors.white,
-                    //               ),
-                    //             ),
-                    //           )
-                    //         : Switch(
-                    //             value: systemOn,
-                    //             activeColor: Colors.lightBlueAccent,
-                    //             inactiveThumbColor: Colors.grey.shade300,
-                    //             inactiveTrackColor: Colors.grey.shade500,
-                    //             onChanged: (value) =>
-                    //                 _handleSystemPowerToggle(value),
-                    //           ),
-                    //   ),
-                    // ),
+                    Text(
+                      "system_status".tr,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Container(
+                      alignment: Alignment.center,
+                      height: 40,
+                      child: Transform.scale(
+                        scale: 1.5,
+                        child: _isSystemPowerBusy
+                            ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
+                                ),
+                              )
+                            : Switch(
+                                value: systemOn,
+                                activeColor: Colors.lightBlueAccent,
+                                inactiveThumbColor: Colors.grey.shade300,
+                                inactiveTrackColor: Colors.grey.shade500,
+                                onChanged: (value) =>
+                                    _handleSystemPowerToggle(value),
+                              ),
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -1186,38 +1186,38 @@ class _HomeState extends State<Home> with TickerProviderStateMixin {
 
             const SizedBox(width: 16),
 
-            // System power switch (relay 10)
+            // System power switch (relay 8)
             Column(
               children: [
-                // Text(
-                //   "system_status".tr,
-                //   style: const TextStyle(
-                //     color: Colors.white,
-                //     fontSize: 12,
-                //     fontWeight: FontWeight.bold,
-                //   ),
-                // ),
-                // _isSystemPowerBusy
-                //     ? const Padding(
-                //         padding: EdgeInsets.symmetric(vertical: 12.0),
-                //         child: SizedBox(
-                //           width: 20,
-                //           height: 20,
-                //           child: CircularProgressIndicator(
-                //             strokeWidth: 2,
-                //             valueColor: AlwaysStoppedAnimation<Color>(
-                //               Colors.white,
-                //             ),
-                //           ),
-                //         ),
-                //       )
-                //     : Switch(
-                //         value: systemOn,
-                //         activeColor: Colors.lightBlueAccent,
-                //         inactiveThumbColor: Colors.grey.shade300,
-                //         inactiveTrackColor: Colors.grey.shade500,
-                //         onChanged: (value) => _handleSystemPowerToggle(value),
-                //       ),
+                Text(
+                  "system_status".tr,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                _isSystemPowerBusy
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 12.0),
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Colors.white,
+                            ),
+                          ),
+                        ),
+                      )
+                    : Switch(
+                        value: systemOn,
+                        activeColor: Colors.lightBlueAccent,
+                        inactiveThumbColor: Colors.grey.shade300,
+                        inactiveTrackColor: Colors.grey.shade500,
+                        onChanged: (value) => _handleSystemPowerToggle(value),
+                      ),
               ],
             ),
           ],
